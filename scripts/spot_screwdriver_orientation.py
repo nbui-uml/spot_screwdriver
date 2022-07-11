@@ -33,7 +33,9 @@ class ArmClient:
 
 
     def arm_to_front(self):
-        """A simple example of using the Boston Dynamics API to command Spot's arm."""
+        """
+        Brings the arm to the front of the robot.
+        """
         robot = self.robot
 
         assert robot.has_arm(), "Robot requires an arm to run this client."
@@ -103,6 +105,12 @@ class ArmClient:
 
 
     def arm_to_pose(self, x, y, z, Z, X, Y, relative_frame=GRAV_ALIGNED_BODY_FRAME_NAME):
+        """
+        Directs the arm to a specified pose.
+        @param x, y, z: type float, position relative to relative_frame
+        @param Z, X, Y: type float, orientation in Euler angles in degrees
+        @param relative_frame: type string, name of the frame that the pose is based on. default=GRAV_ALIGNED_BODY_FRAME_NAME
+        """
         robot = self.robot
 
         assert robot.has_arm(), "Robot requires an arm to run this client."
