@@ -1,0 +1,4 @@
+string topic
+---
+bool success
+float64 angle

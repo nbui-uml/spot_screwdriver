@@ -1,0 +1,2 @@
+- setup-file:
+    local-name: /home/csrobot/catkin_ws/src/spot_screwdriver/build/devel/setup.sh

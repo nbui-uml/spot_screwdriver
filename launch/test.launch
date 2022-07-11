@@ -1,0 +1,4 @@
+<launch>
+    <node name="camera_publisher" pkg="spot_screwdriver" type="camera_topic_publisher.py" output="screen"/>
+    <node name="screwdriver_orientation_service" pkg="spot_screwdriver" type="screwdriver_orientation_srv.py" output="screen"/>
+</launch>
