@@ -173,6 +173,30 @@ class ArmClient:
 
             robot.logger.info('Done.')
 
+    def stow_arm(self):
+        robot = self.robot
+
+        assert robot.has_arm(), "Robot requires an arm to run this client."
+
+        # Verify the robot is not estopped and that an external application has registered and holds
+        # an estop endpoint.
+        assert not robot.is_estopped(), "Robot is estopped. Please use an external E-Stop client, " \
+                                        "such as the estop SDK example, to configure E-Stop."
+
+        robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
+        command_client = robot.ensure_client(RobotCommandClient.default_service_name)
+        lease_client = robot.ensure_client(bosdyn.client.lease.LeaseClient.default_service_name)
+        with bosdyn.client.lease.LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True):
+            if not robot.is_powered_on():
+                robot.logger.info("Powering on robot... This may take a several seconds.")
+                robot.power_on(timeout_sec=20)
+                assert robot.is_powered_on(), "Robot power on failed."
+                robot.logger.info("Robot powered on.")
+
+            stow = RobotCommandBuilder.arm_stow_command()
+            stow_command_id = command_client.robot_command(stow)
+            robot.logger.info("Stow command issued.")
+            block_until_arm_arrives(command_client, stow_command_id, 3.0)
 
 def main(argv):
     """Command line interface."""
@@ -182,6 +206,8 @@ def main(argv):
     try:
         arm_client = ArmClient(options)
         arm_client.arm_to_front()
+        time.sleep(3)
+        arm_client.stow_arm()
         arm_client.power_off_safe()
         return True
     except Exception as exc:  # pylint: disable=broad-except
