@@ -111,57 +111,7 @@ def imgmsg_to_cv2(img_msg):
     if img_msg.is_bigendian == (sys.byteorder == 'little'):
         image_opencv = image_opencv.byteswap().newbyteorder()
     return image_opencv
-
-'''
-def screwdriver_orientationCB(req: TriggerRequest) -> TriggerResponse:
-    """
-    Callback for the service request.
-    Precondition: The arm is positioned in front of the head where the screwdriver can be viewed head-on.
-    Postcondition: A transform frame from the tip of the screwdriver to the gripper is created and published.
-    @param req: type TriggerRequest from std_srvs.srv
-    @return: type TriggerResponse from std_srvs.srv
-    """
-    avg_angle = 400.0
-    tries = 0
-    while avg_angle == 400.0 and tries < 10: #while not a valid angle and still under 10 tries
-        L_image = rospy.wait_for_message(L_cam_topic, Image, 5)
-        R_image = rospy.wait_for_message(R_cam_topic, Image, 5)
-
-        try:
-            L_cv = imgmsg_to_cv2(L_image)
-            R_cv = imgmsg_to_cv2(R_image)
-        except:
-            print("Failed to convert to CV2")
-
-        L_cv = cv2.rotate(L_cv, cv2.ROTATE_90_CLOCKWISE)
-        R_cv = cv2.rotate(R_cv, cv2.ROTATE_90_CLOCKWISE)
-
-        #probably create a haar cascade to recognize screwdriver from image, then isolate that region as a square img to pass to the orientation classifier
-        L_angle = angle_from_raw_image(L_cv)
-        print(f"L_angle: {L_angle}")
-        R_angle = angle_from_raw_image(R_cv)
-        print(f"R_angle: {R_angle}")
-        if L_angle != 400.0 and R_angle != 400.0:
-            avg_angle = (L_angle + R_angle) / 2
-        elif L_angle == 400.0 and R_angle != 400.0:
-            avg_angle = R_angle
-        elif L_angle != 400.0 and R_angle == 400.0:
-            avg_angle = L_angle
-
-    #construct response object
-    response = TriggerResponse()
-    #if service failed to get the orientation of screwdriver
-    if avg_angle == 400.0: 
-        response.success = False
-        response.message = "Unable to calculate angle. Reorient the screwdriver and try again."
-    #otherwise, publish the angle
-    else:
-        response.success = True
-        response.message = f"Angle: {avg_angle}"
-        publish_transform_from_angle(avg_angle)
-
-    return response
-'''
+    
 
 def screwdriver_orientationCB(req: ScrewdriverOrientationSrvRequest) -> ScrewdriverOrientationSrvResponse:
     """
