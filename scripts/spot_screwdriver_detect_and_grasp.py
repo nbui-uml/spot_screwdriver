@@ -50,7 +50,7 @@ class DetectAndGraspClient:
         self.INPUT_HEIGHT = 640
         self.SCORE_THRESHOLD = 0.3
         self.NMS_THRESHOLD = 0.4
-        self.CONFIDENCE_THRESHOLD = 0.4
+        self.CONFIDENCE_THRESHOLD = 0.5
         self.net = cv2.dnn.readNet(config.net)
 
 
@@ -239,3 +239,46 @@ class DetectAndGraspClient:
         result = np.zeros((_max, _max, 3), np.uint8)
         result[0:row, 0:col] = frame
         return result
+
+
+#-----Testing-----
+
+def main(argv):
+    """Command line interface."""
+    from spot_dock_undock import DockingClient
+    from spot_screwdriver_orientation import ArmClient
+
+    parser = argparse.ArgumentParser()
+    bosdyn.client.util.add_base_arguments(parser)
+    parser.add_argument("--net", help="Path to yolov5 ONNX file",  
+        default="/home/csrobot/catkin_ws/src/spot_screwdriver/models/screwdriver_yolo5.onnx")
+    options = parser.parse_args(argv)
+    try: #get lease here and do stuff
+        docking_client = DockingClient(options)
+        grasping_client = DetectAndGraspClient(options)
+        arm_client = ArmClient(options)
+        lease_client = grasping_client.robot.ensure_client(bosdyn.client.lease.LeaseClient.default_service_name)
+        with bosdyn.client.lease.LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True):
+            #undock
+            docking_client.undock()
+
+            success = grasping_client.detect_and_grasp()
+            if success == True:
+                print("Grasp successful")
+            else:
+                print("Unable to find and grasp screwdriver")
+
+            arm_client.stow_arm()
+
+            #dock
+            docking_client.dock(520)
+        return True
+    except Exception as exc:  # pylint: disable=broad-except
+        logger = bosdyn.client.util.get_logger()
+        logger.exception("Threw an exception")
+        return False
+
+
+if __name__ == '__main__':
+    if not main(sys.argv[1:]):
+        sys.exit(1)

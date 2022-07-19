@@ -17,10 +17,6 @@ from spot_screwdriver_orientation import ArmClient
 from spot_screwdriver.srv import ScrewdriverOrientationSrv, ScrewdriverOrientationSrvRequest, ScrewdriverOrientationSrvResponse
 
 get_screwdriver_orientation = None
-front_pose =  {
-    "position" : (0.55, 0.0, -0.10),
-    "orientation" : (0.0, 15.0, 180.0)
-}
 L_cam_topic = rospy.get_param("L_front_cam_topic", "camera/frontleft/camera/image")
 R_cam_topic = rospy.get_param("R_front_came_topic", "camera/frontright/camera/image")
 
@@ -44,7 +40,8 @@ def main(argv) -> int:
     get_screwdriver_orientation = rospy.ServiceProxy("screwdriver_orientation", ScrewdriverOrientationSrv)
 
     try:
-        arm_client.arm_to_front()
+        sh0,sh1,el0,el1,wr0,wr1 = arm_client.joint_states["front"]
+        arm_client.arm_to_pose(sh0,sh1,el0,el1,wr0,wr1)
     except Exception as e:
         bosdyn_logger.exception("Exception moving arm to front")
         return FAILURE
@@ -55,10 +52,9 @@ def main(argv) -> int:
         #Face one of the cameras
         print(f"Moving to {'right' if RIGHT_CAM == 1 else 'left'} camera position")
         try:
-            x, y, z = front_pose["position"]
-            X, Y, Z = front_pose["orientation"]
-            Z = 180 + (RIGHT_CAM * 10)
-            arm_client.arm_to_pose(x, y, z, Z, X, Y)
+            sh0,sh1,el0,el1,wr0,wr1 = arm_client.joint_states["front"]
+            #something here
+            arm_client.arm_to_pose(sh0,sh1,el0,el1,wr0,wr1)
             print(f"Moved to {'right' if RIGHT_CAM == 1 else 'left'} camera position")
         except Exception as e:  # pylint: disable=broad-except
             bosdyn_logger.exception("Threw an exception")

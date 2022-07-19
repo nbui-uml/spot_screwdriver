@@ -7,7 +7,7 @@ INPUT_WIDTH = 640
 INPUT_HEIGHT = 640
 SCORE_THRESHOLD = 0.3
 NMS_THRESHOLD = 0.4
-CONFIDENCE_THRESHOLD = 0.4
+CONFIDENCE_THRESHOLD = 0.5
 
 def detect(image, net):
     blob = cv2.dnn.blobFromImage(image, 1/255.0, (INPUT_WIDTH, INPUT_HEIGHT), crop=False)
@@ -49,7 +49,7 @@ def wrap_detection(input_image, output_data):
                 box = np.array([left, top, width, height])
                 boxes.append(box)
 
-    indexes = cv2.dnn.NMSBoxes(boxes, confidences, 0.25, 0.45) 
+    indexes = cv2.dnn.NMSBoxes(boxes, confidences, 0.3, 0.45) 
 
     result_class_ids = []
     result_confidences = []
@@ -74,6 +74,11 @@ def format_yolov5(frame):
 net = cv2.dnn.readNet("/home/csrobot/catkin_ws/src/spot_screwdriver/models/screwdriver_yolo5.onnx")
 img = cv2.imread("/home/csrobot/catkin_ws/src/spot_screwdriver/test_screwdriver_detection/img/frontright_fisheye_image.jpg")
 
+'''
+img = cv2.resize(img, (0,0), fx=0.25, fy=0.25)
+img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+'''
 
 inputImage = format_yolov5(img)
 outs = detect(inputImage, net)
@@ -84,7 +89,7 @@ for (classid, confidence, box) in zip(class_ids, confidences, boxes):
         color = (0,0,255)
         cv2.rectangle(img, box, color, 2)
         cv2.rectangle(img, (box[0], box[1] - 20), (box[0] + box[2], box[1]), color, -1)
-        cv2.putText(img, "screwdriver", (box[0], box[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, .5, (0,0,0))
+        cv2.putText(img, f"screwdriver: {confidence}", (box[0], box[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, .5, (0,0,0))
 
 cv2.imshow("output", img)
 
