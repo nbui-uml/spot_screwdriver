@@ -8,13 +8,25 @@ import bosdyn.client
 import bosdyn.client.lease
 import bosdyn.client.util
 import bosdyn.geometry
-from bosdyn.api import arm_command_pb2, geometry_pb2
+from bosdyn.api import arm_command_pb2, geometry_pb2, synchronized_command_pb2, robot_command_pb2
 from bosdyn.client import math_helpers
 from bosdyn.client.frame_helpers import GRAV_ALIGNED_BODY_FRAME_NAME, ODOM_FRAME_NAME,  HAND_FRAME_NAME, get_a_tform_b
 from bosdyn.client.robot_command import (RobotCommandBuilder, RobotCommandClient,
                                          block_until_arm_arrives, blocking_stand)
 from bosdyn.client.robot_state import RobotStateClient
-from bosdyn.client.image import ImageClient
+
+
+def make_robot_command(arm_joint_traj):
+    """ Helper function to create a RobotCommand from an ArmJointTrajectory.
+        The returned command will be a SynchronizedCommand with an ArmJointMoveCommand
+        filled out to follow the passed in trajectory. """
+
+    joint_move_command = arm_command_pb2.ArmJointMoveCommand.Request(trajectory=arm_joint_traj)
+    arm_command = arm_command_pb2.ArmCommand.Request(arm_joint_move_command=joint_move_command)
+    sync_arm = synchronized_command_pb2.SynchronizedCommand.Request(arm_command=arm_command)
+    arm_sync_robot_cmd = robot_command_pb2.RobotCommand(synchronized_command=sync_arm)
+    return RobotCommandBuilder.build_synchro_command(arm_sync_robot_cmd)
+
 
 class ArmClient:
     def __init__(self, config) -> None:
@@ -23,6 +35,9 @@ class ArmClient:
         self.robot = self.sdk.create_robot(config.hostname)
         bosdyn.client.util.authenticate(self.robot)
         self.robot.time_sync.wait_for_sync()
+        self.joint_states = {
+            "front": (0.070,-0.328,1.611,-0.049,1.825,0.007)
+        }
 
 
     def power_off_safe(self):
@@ -33,82 +48,10 @@ class ArmClient:
         self.robot.logger.info("Robot safely powered off.")
 
 
-    def arm_to_front(self):
+    def arm_to_pose(self, sh0, sh1, el0, el1, wr0, wr1):
         """
-        Brings the arm to the front of the robot.
-        """
-        robot = self.robot
-
-        assert robot.has_arm(), "Robot requires an arm to run this client."
-
-        # Verify the robot is not estopped and that an external application has registered and holds
-        # an estop endpoint.
-        assert not robot.is_estopped(), "Robot is estopped. Please use an external E-Stop client, " \
-                                        "such as the estop SDK example, to configure E-Stop."
-
-        robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
-
-        # Now, we are ready to power on the robot. This call will block until the power
-        # is on. Commands would fail if this did not happen. We can also check that the robot is
-        # powered at any point.
-        if not robot.is_powered_on():
-            robot.logger.info("Powering on robot... This may take a several seconds.")
-            robot.power_on(timeout_sec=20)
-            assert robot.is_powered_on(), "Robot power on failed."
-            robot.logger.info("Robot powered on.")
-
-        # Tell the robot to stand up. The command service is used to issue commands to a robot.
-        # The set of valid commands for a robot depends on hardware configuration. See
-        # SpotCommandHelper for more detailed examples on command building. The robot
-        # command service requires timesync between the robot and the client.
-        robot.logger.info("Commanding robot to stand...")
-        command_client = robot.ensure_client(RobotCommandClient.default_service_name)
-        blocking_stand(command_client, timeout_sec=10)
-        robot.logger.info("Robot standing.")
-
-        # Make the arm pose RobotCommand
-        # Build a position to move the arm to (in meters, relative to and expressed in the gravity aligned body frame).
-        x = 0.55
-        y = 0
-        z = -0.10
-        hand_ewrt_flat_body = geometry_pb2.Vec3(x=x, y=y, z=z)
-
-        # Rotation as a quaternion
-        q = bosdyn.geometry.EulerZXY(math.radians(180), 0.0, math.radians(15)).to_quaternion() #whatever angle spot's cameras are looking down at
-        flat_body_Q_hand = geometry_pb2.Quaternion(w=q.w, x=q.x, y=q.y, z=q.z)
-
-        flat_body_T_hand = geometry_pb2.SE3Pose(position=hand_ewrt_flat_body,
-                                                rotation=flat_body_Q_hand)
-
-        robot_state = robot_state_client.get_robot_state()
-        odom_T_flat_body = get_a_tform_b(robot_state.kinematic_state.transforms_snapshot,
-                                        ODOM_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME)
-
-        odom_T_hand = odom_T_flat_body * math_helpers.SE3Pose.from_obj(flat_body_T_hand)
-
-        # duration in seconds
-        seconds = 3
-
-        arm_command = RobotCommandBuilder.arm_pose_command(
-            odom_T_hand.x, odom_T_hand.y, odom_T_hand.z, odom_T_hand.rot.w, odom_T_hand.rot.x,
-            odom_T_hand.rot.y, odom_T_hand.rot.z, ODOM_FRAME_NAME, seconds)
-
-        # Send the request
-        cmd_id = command_client.robot_command(arm_command)
-        robot.logger.info('Moving arm to viewing position.')
-
-        # Wait until the arm arrives at the goal.
-        block_until_arm_arrives(command_client, cmd_id, seconds + 3.0)
-
-        robot.logger.info('Done.')
-
-
-    def arm_to_pose(self, x, y, z, Z, X, Y, relative_frame=GRAV_ALIGNED_BODY_FRAME_NAME):
-        """
-        Directs the arm to a specified pose.
-        @param x, y, z: type float, position relative to relative_frame
-        @param Z, X, Y: type float, orientation in Euler angles in degrees
-        @param relative_frame: type string, name of the frame that the pose is based on. default=GRAV_ALIGNED_BODY_FRAME_NAME
+        Directs the arm to a specified joint position
+        @param sh0, sh1, el0, el1, wr0, wr1: type float, joint position
         """
         robot = self.robot
 
@@ -135,40 +78,18 @@ class ArmClient:
         command_client = robot.ensure_client(RobotCommandClient.default_service_name)
         blocking_stand(command_client, timeout_sec=10)
 
-        #Need to get current pose
-        robot_state = robot_state_client.get_robot_state()
-
         # Make the arm pose RobotCommand
-        # Build a position to move the arm to (in meters, relative to and expressed in the gravity aligned body frame).
-        hand_ewrt_flat_body = geometry_pb2.Vec3(x=x, y=y, z=z)
+        traj_point = RobotCommandBuilder.create_arm_joint_trajectory_point(sh0,sh1,el0,el1,wr0,wr1)
+        arm_joint_traj = arm_command_pb2.ArmJointTrajectory(points=[traj_point])
+        command = make_robot_command(arm_joint_traj)
 
-        # Rotation as a quaternion
-        q = bosdyn.geometry.EulerZXY(math.radians(Z), math.radians(X), math.radians(Y)).to_quaternion()
+        #send request
+        cmd_id = command_client.robot_command(command)
+        robot.logger.info(f"Moving arm to position [{sh0},{sh1},{el0},{el1},{wr0},{wr1}]")
 
-        flat_body_Q_hand = geometry_pb2.Quaternion(w=q.w, x=q.x, y=q.y, z=q.z)
+        block_until_arm_arrives(command_client, cmd_id, timeout_sec=10)
+        print("Arm finished moving")
 
-        flat_body_T_hand = geometry_pb2.SE3Pose(position=hand_ewrt_flat_body,
-                                                rotation=flat_body_Q_hand)
-        odom_T_flat_body = get_a_tform_b(robot_state.kinematic_state.transforms_snapshot,
-                                        ODOM_FRAME_NAME, GRAV_ALIGNED_BODY_FRAME_NAME)
-
-        odom_T_hand = odom_T_flat_body * math_helpers.SE3Pose.from_obj(flat_body_T_hand)
-
-        # duration in seconds
-        seconds = 3
-
-        arm_command = RobotCommandBuilder.arm_pose_command(
-            odom_T_hand.x, odom_T_hand.y, odom_T_hand.z, odom_T_hand.rot.w, odom_T_hand.rot.x,
-            odom_T_hand.rot.y, odom_T_hand.rot.z, ODOM_FRAME_NAME, seconds)
-
-        # Send the request
-        cmd_id = command_client.robot_command(arm_command)
-        robot.logger.info('Moving arm to viewing position.')
-
-        # Wait until the arm arrives at the goal.
-        block_until_arm_arrives(command_client, cmd_id, seconds + 3.0)
-
-        robot.logger.info('Done.')
 
     def stow_arm(self):
         robot = self.robot
@@ -194,31 +115,37 @@ class ArmClient:
         robot.logger.info("Stow command issued.")
         block_until_arm_arrives(command_client, stow_command_id, 3.0)
 
+
+#------Testing----------
+
 def main(argv):
     """Command line interface."""
+    from spot_dock_undock import DockingClient
+
     parser = argparse.ArgumentParser()
     bosdyn.client.util.add_base_arguments(parser)
     options = parser.parse_args(argv)
     try: #get lease here and do stuff
         arm_client = ArmClient(options)
+        docking_client = DockingClient(options)
         lease_client = arm_client.robot.ensure_client(bosdyn.client.lease.LeaseClient.default_service_name)
         with bosdyn.client.lease.LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True):
+            #undock
+            docking_client.undock()
+
             #arm to front
-            arm_client.arm_to_front()
-            time.sleep(3)
+            sh0,sh1,el0,el1,wr0,wr1 = arm_client.joint_states["front"]
+            arm_client.arm_to_pose(sh0,sh1,el0,el1,wr0,wr1)
+            
+            #wait
+            input("Press any key to continue")
 
-            #arm to right cam
-            front_pose =  {
-                "position" : (0.55, 0.0, -0.10),
-                "orientation" : (0.0, 15.0, 180.0)
-            }
-            x, y, z = front_pose["position"]
-            X, Y, Z = front_pose["orientation"]
-            Z = 180 + 10
-            arm_client.arm_to_pose(x, y, z, Z, X, Y)
-
-            #stow arm and power off
+            #stow arm
             arm_client.stow_arm()
+
+            #dock
+            docking_client.dock(520)
+
             arm_client.power_off_safe()
         return True
     except Exception as exc:  # pylint: disable=broad-except
