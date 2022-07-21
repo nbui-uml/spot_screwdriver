@@ -72,13 +72,13 @@ def format_yolov5(frame):
 
 
 net = cv2.dnn.readNet("/home/csrobot/catkin_ws/src/spot_screwdriver/models/screwdriver_yolo5.onnx")
-img = cv2.imread("/home/csrobot/catkin_ws/src/spot_screwdriver/test_screwdriver_detection/img/frontright_fisheye_image.jpg")
+img = cv2.imread("/home/csrobot/catkin_ws/src/spot_screwdriver/test_screwdriver_detection/img/7121.jpg")
 
-'''
+
 img = cv2.resize(img, (0,0), fx=0.25, fy=0.25)
 img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-'''
+
 
 inputImage = format_yolov5(img)
 outs = detect(inputImage, net)
