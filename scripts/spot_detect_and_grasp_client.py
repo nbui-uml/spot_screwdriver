@@ -1,7 +1,7 @@
 import argparse
 import sys
+import os
 import time
-from typing import Any
 
 import cv2
 import numpy as np
@@ -12,44 +12,39 @@ import bosdyn.client.lease
 import bosdyn.client.util
 from bosdyn.api import estop_pb2, geometry_pb2, image_pb2, manipulation_api_pb2
 from bosdyn.client.estop import EstopClient
-from bosdyn.client.frame_helpers import VISION_FRAME_NAME, get_vision_tform_body, math_helpers
+from bosdyn.client.frame_helpers import VISION_FRAME_NAME, get_vision_tform_body, math_helpers, get_a_tform_b, GRAV_ALIGNED_BODY_FRAME_NAME
 from bosdyn.client.image import ImageClient
 from bosdyn.client.manipulation_api_client import ManipulationApiClient
-from bosdyn.client.robot_command import RobotCommandClient, blocking_stand
+from bosdyn.client.robot_command import RobotCommandClient, RobotCommandBuilder, blocking_stand, block_until_arm_arrives
 from bosdyn.client.robot_state import RobotStateClient
 
+from spot_arm_client import ArmClient
+
+
 class DetectAndGraspClient:
-    def __init__(self, config: argparse.Namespace):
+    def __init__(self, config: argparse.Namespace, robot: bosdyn.client.Robot) -> None:
         """
         Intializes DetectAndGraspClient instance.
         Config parameters:
             bosdyn.client.util base arguments
             config.net: location of YOLOv5 ONNX file
+        @param robot: type bosdyn.client.Robot, the robot instance.
         """
         #robot stuff
-        bosdyn.client.util.setup_logging(config.verbose)
+        self.config = config
         self.sdk = bosdyn.client.create_standard_sdk("GraspingClient")
-        self.robot = self.sdk.create_robot(config.hostname)
-        bosdyn.client.util.authenticate(self.robot)
-        self.robot.time_sync.wait_for_sync()
-        
-        self.robot_state_client = self.robot.ensure_client(RobotStateClient.default_service_name)
-        self.image_client = self.robot.ensure_client(ImageClient.default_service_name)
-        self.manipulation_api_client = self.robot.ensure_client(ManipulationApiClient.default_service_name)
+        self.robot = robot
 
         self.image_sources = [
             "frontleft_fisheye_image",
-            "frontright_fisheye_image",
-            "left_fisheye_image",
-            "right_fisheye_image",
-            "back_fisheye_image"
+            "frontright_fisheye_image"
         ]
 
         #detection model stuff
         self.INPUT_WIDTH = 640
         self.INPUT_HEIGHT = 640
-        self.SCORE_THRESHOLD = 0.3
-        self.NMS_THRESHOLD = 0.4
+        self.SCORE_THRESHOLD = 0.25
+        self.NMS_THRESHOLD = 0.45
         self.CONFIDENCE_THRESHOLD = 0.5
         self.net = cv2.dnn.readNet(config.net)
 
@@ -66,6 +61,9 @@ class DetectAndGraspClient:
                                         "such as the estop SDK example, to configure E-Stop."
         assert robot.has_arm(), "Robot requires an arm to run this client."
 
+        command_client = robot.ensure_client(RobotCommandClient.default_service_name)
+        image_client = robot.ensure_client(ImageClient.default_service_name)
+
         #power on
         if not robot.is_powered_on():
             robot.logger.info("Powering on robot... This may take a several seconds.")
@@ -75,18 +73,17 @@ class DetectAndGraspClient:
         
         #stand
         robot.logger.info("Commanding robot to stand...")
-        command_client = robot.ensure_client(RobotCommandClient.default_service_name)
         blocking_stand(command_client, timeout_sec=10)
         robot.logger.info("Robot standing.")
 
         robot.logger.info("Getting images")
-        image_responses = self.image_client.get_image_from_sources(self.image_sources)
+        image_responses = image_client.get_image_from_sources(self.image_sources)
 
-        if len(image_responses) == 0:
-            print("Unable to get images")
-            assert False
+        #check if images were received
+        assert len(image_responses), "Unable to get images."
         
         for image in image_responses:
+            #format image to cv2
             if image.shot.image.pixel_format == image_pb2.Image.PIXEL_FORMAT_DEPTH_U16:
                 dtype = np.uint16
             else:
@@ -96,77 +93,85 @@ class DetectAndGraspClient:
                 img = img.reshape(image.shot.image.rows, image.shot.image.cols)
             else:
                 img = cv2.imdecode(img, -1)
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
+            #send image through detection model
             formatted_img = self.format_yolov5(img)
             out = self.detect(formatted_img, self.net)
             class_ids, confidences, boxes = self.wrap_detection(formatted_img, out[0])
 
+            #check for detections
             if len(boxes) == 1:
                 box = boxes[0]
-                cx = box[0] + (box[2] * 0.5)
-                cy = box[1] + (box[3] * 0.5)
-                self.grasp_from_image(image, cx, cy)
+                if box[2] > 300 or box[3] > 300:
+                    print(f"No objects found in {image.shot.frame_name_image_sensor}")
+                    continue
+
+                cx = int(box[0] + (box[2] * 0.5))
+                cy = int(box[1] + (box[3] * 0.5))
+                print(f"Object found at {(cx, cy)}, {box} in {image.shot.frame_name_image_sensor}")
+
+                if box[0] < 0:
+                    box[0] = 0
+                if box[1] < 0:
+                    box[1] = 0
+                if box[0] + box[2] > img.shape[1]:
+                    box[2] = img.shape[1] - box[0]
+                if box[1] + box[3] > img.shape[0]:
+                    box[3] = img.shape[0] - box[1]
+                
+                #debugging
+                if os.path.exists("out/detect.jpg"):
+                    os.remove("out/detect.jpg")
+                boxed_img = img.copy()
+                cv2.rectangle(boxed_img, box, (0,0,255), 2)
+                cv2.imwrite("out/detect.jpg", boxed_img)
+                
+                clip = img[box[1] : box[1] + box[3], box[0] : box[0] + box[2]]
+
+                self.grasp_from_image(image, cx, cy, clip)
                 return True
+            else:
+                print(f"No objects found in {image.shot.frame_name_image_sensor}")
 
         return False
 
 
-    def grasp_from_image(self, image: image_pb2.Image, x: int, y: int) -> None:
+    def grasp_from_image(self, image: image_pb2.Image, pixel_x: int, pixel_y: int, clip: np.ndarray) -> None:
         """
         Attempts a grasp at a position defined in the image.
         @param image: type image_pb2.Image, image from Image service.
-        @param x, y: type int, positions defined in image.
+        @param pixel_x, pixel_y: type int, positions defined in image.
         """
         robot = self.robot
 
-        #check estop here
-        assert not robot.is_estopped(), "Robot is estopped. Please use an external E-Stop client, " \
-                                        "such as the estop SDK example, to configure E-Stop."
-        assert robot.has_arm(), "Robot requires an arm to run this client."
-
-        #power on
-        if not robot.is_powered_on():
-            robot.logger.info("Powering on robot... This may take a several seconds.")
-            robot.power_on(timeout_sec=20)
-            assert robot.is_powered_on(), "Robot power on failed."
-            robot.logger.info("Robot powered on.")
+        x, y, z = bosdyn.client.image.pixel_to_camera_space(image, pixel_x, pixel_y)
+        print(f"Object at {(x, y, z)} to camera frame")
         
-        #stand
-        robot.logger.info("Commanding robot to stand...")
-        command_client = robot.ensure_client(RobotCommandClient.default_service_name)
-        blocking_stand(command_client, timeout_sec=10)
-        robot.logger.info("Robot standing.")
+        self.arm_to_above_object(image, pixel_x, pixel_y)
 
-        #construct commmand
-        robot.logger.info(f"Picking object at image location ({x},{y})")
-        pick_vec = geometry_pb2.Vec2(x=x, y=y)
-        grasp = manipulation_api_pb2.PickObjectInImage(
-            pixel_xy=pick_vec, transforms_snapshot_for_camera=image.shot.transforms_snapshot,
-            frame_name_image_sensor=image.shot.frame_name_image_sensor, camera_model=image.source.pinhole
+            
+    def arm_to_above_object(self, image: image_pb2.Image, pixel_x: int, pixel_y: int) -> None:
+        """
+        Move arm above a point in the image.
+        @param image: type image_pb2.Image, image from Image service.
+        @param pixel_x, pixel_y: type int, positions defined in image.
+        """
+        robot = self.robot
+        arm_client = ArmClient(self.config, robot)
+
+        x, y, z = bosdyn.client.image.pixel_to_camera_space(image, pixel_x, pixel_y)
+        y += 0.2
+
+        cam_T_body = get_a_tform_b(image.shot.transforms_snapshot,
+                image.shot.frame_name_image_sensor, GRAV_ALIGNED_BODY_FRAME_NAME)
+        hand_T_body = cam_T_body * math_helpers.SE3Pose(0,0,0, geometry_pb2.Quaternion(0.707, 0, 0, -0.707))
+
+        arm_client.arm_move(
+            x, y, z, 
+            hand_T_body.rot.x, hand_T_body.rot.y, hand_T_body.rot.z, hand_T_body.rot.w,
+            image.shot.frame_name_image_sensor, image.shot.transforms_snapshot
         )
-
-        grasp_request = manipulation_api_pb2.ManipulationApiRequest(pick_object_in_image=grasp)
-
-        #send request
-        cmd_response = self.manipulation_api_client.manipulation_api_command(manipulation_api_request=grasp_request)
-
-        while True:
-            feedback_request = manipulation_api_pb2.ManipulationApiFeedbackRequest(
-                manipulation_cmd_id=cmd_response.manipulation_cmd_id)
-
-            # Send the request
-            response = self.manipulation_api_client.manipulation_api_feedback_command(
-                manipulation_api_feedback_request=feedback_request)
-
-            print('Current state: ',
-                  manipulation_api_pb2.ManipulationFeedbackState.Name(response.current_state))
-
-            if response.current_state == manipulation_api_pb2.MANIP_STATE_GRASP_SUCCEEDED or response.current_state == manipulation_api_pb2.MANIP_STATE_GRASP_FAILED:
-                break
-
-            time.sleep(0.25)
-
-        robot.logger.info('Finished grasp.')
 
 
     def detect(self, image: np.ndarray, net: cv2.dnn.Net) -> np.ndarray:
@@ -202,7 +207,7 @@ class DetectAndGraspClient:
                 classes_scores = row[5:]
                 _, _, _, max_indx = cv2.minMaxLoc(classes_scores)
                 class_id = max_indx[1]
-                if (classes_scores[class_id] > .25):
+                if (classes_scores[class_id] > self.SCORE_THRESHOLD):
 
                     confidences.append(confidence)
 
@@ -216,7 +221,7 @@ class DetectAndGraspClient:
                     box = np.array([left, top, width, height])
                     boxes.append(box)
 
-        indexes = cv2.dnn.NMSBoxes(boxes, confidences, 0.25, 0.45) 
+        indexes = cv2.dnn.NMSBoxes(boxes, confidences, self.SCORE_THRESHOLD, self.NMS_THRESHOLD) 
 
         result_class_ids = []
         result_confidences = []
@@ -234,6 +239,7 @@ class DetectAndGraspClient:
         """
         Pads image for YOLOv5.
         """
+        
         row, col, _ = frame.shape
         _max = max(col, row)
         result = np.zeros((_max, _max, 3), np.uint8)
@@ -243,41 +249,48 @@ class DetectAndGraspClient:
 
 #-----Testing-----
 
+
 def main(argv):
     """Command line interface."""
-    from spot_docking_client import DockingClient
-    from spot_arm_client import ArmClient
+    from scripts.spot_docking_client import DockingClient
+    from scripts.spot_arm_client import ArmClient
 
     parser = argparse.ArgumentParser()
     bosdyn.client.util.add_base_arguments(parser)
     parser.add_argument("--net", help="Path to yolov5 ONNX file",  
         default="/home/csrobot/catkin_ws/src/spot_screwdriver/models/screwdriver_yolo5.onnx")
     options = parser.parse_args(argv)
-    try: #get lease here and do stuff
-        docking_client = DockingClient(options)
-        grasping_client = DetectAndGraspClient(options)
-        arm_client = ArmClient(options)
-        lease_client = grasping_client.robot.ensure_client(bosdyn.client.lease.LeaseClient.default_service_name)
-        with bosdyn.client.lease.LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True):
+    #try: #get lease here and do stuff
+        #docking_client = DockingClient(options)
+    grasping_client = DetectAndGraspClient(options)
+        #arm_client = ArmClient(options)
+    lease_client = grasping_client.robot.ensure_client(bosdyn.client.lease.LeaseClient.default_service_name)
+        #with bosdyn.client.lease.LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True):
             #undock
-            docking_client.undock()
+            #docking_client.undock()
 
-            success = grasping_client.detect_and_grasp()
-            if success == True:
-                print("Grasp successful")
-            else:
-                print("Unable to find and grasp screwdriver")
+    input("Press any key to continue")
 
-            arm_client.stow_arm()
+    while True:
+        success = grasping_client.detect_and_grasp()
+        if success == True:
+            print("Screwdriver found")
+        else:
+            print("Unable to find screwdriver")
+        if input("Try again? (y/n)").lower() == "n":
+            break
+
+            #arm_client.stow_arm()
 
             #dock
-            docking_client.dock(520)
-        return True
+            #docking_client.dock(520)
+        #return True
+        """
     except Exception as exc:  # pylint: disable=broad-except
         logger = bosdyn.client.util.get_logger()
         logger.exception("Threw an exception")
         return False
-
+        """
 
 if __name__ == '__main__':
     if not main(sys.argv[1:]):

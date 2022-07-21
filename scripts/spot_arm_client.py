@@ -16,7 +16,7 @@ from bosdyn.client.robot_command import (RobotCommandBuilder, RobotCommandClient
 from bosdyn.client.robot_state import RobotStateClient
 
 
-def make_robot_command(arm_joint_traj):
+def make_robot_command(arm_joint_traj: arm_command_pb2.ArmJointTrajectory) -> synchronized_command_pb2.SynchronizedCommand:
     """ Helper function to create a RobotCommand from an ArmJointTrajectory.
         The returned command will be a SynchronizedCommand with an ArmJointMoveCommand
         filled out to follow the passed in trajectory. """
@@ -29,26 +29,24 @@ def make_robot_command(arm_joint_traj):
 
 
 class ArmClient:
-    def __init__(self, config) -> None:
-        bosdyn.client.util.setup_logging(config.verbose)
+    def __init__(self, config: argparse.Namespace, robot: bosdyn.client.Robot) -> None:
         self.sdk = bosdyn.client.create_standard_sdk("SpotArmClient")
-        self.robot = self.sdk.create_robot(config.hostname)
-        bosdyn.client.util.authenticate(self.robot)
-        self.robot.time_sync.wait_for_sync()
+        self.robot = robot
+
         self.joint_states = {
             "front": (0.070,-0.328,1.611,-0.049,1.825,0.007)
         }
 
 
-    def power_off_safe(self):
-        # Power the robot off. By specifying "cut_immediately=False", a safe power off command
-        # is issued to the robot. This will attempt to sit the robot before powering off.
+    def power_off_safe(self) -> None:
+        """
+        Commands the robot to perform a safe power off.
+        """
         self.robot.power_off(cut_immediately=False, timeout_sec=20)
         assert not self.robot.is_powered_on(), "Robot power off failed."
         self.robot.logger.info("Robot safely powered off.")
 
-
-    def arm_to_pose(self, sh0, sh1, el0, el1, wr0, wr1):
+    def joint_move(self, sh0, sh1, el0, el1, wr0, wr1) -> None:
         """
         Directs the arm to a specified joint position
         @param sh0, sh1, el0, el1, wr0, wr1: type float, joint position
@@ -63,6 +61,7 @@ class ArmClient:
                                         "such as the estop SDK example, to configure E-Stop."
 
         robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
+        command_client = robot.ensure_client(RobotCommandClient.default_service_name)
 
         if not robot.is_powered_on():
             robot.logger.info("Powering on robot... This may take a several seconds.")
@@ -70,12 +69,8 @@ class ArmClient:
             assert robot.is_powered_on(), "Robot power on failed."
             robot.logger.info("Robot powered on.")
 
-        # Tell the robot to stand up. The command service is used to issue commands to a robot.
-        # The set of valid commands for a robot depends on hardware configuration. See
-        # SpotCommandHelper for more detailed examples on command building. The robot
-        # command service requires timesync between the robot and the client.
+        # Tell the robot to stand up.
         robot.logger.info("Commanding robot to stand...")
-        command_client = robot.ensure_client(RobotCommandClient.default_service_name)
         blocking_stand(command_client, timeout_sec=10)
 
         # Make the arm pose RobotCommand
@@ -85,13 +80,69 @@ class ArmClient:
 
         #send request
         cmd_id = command_client.robot_command(command)
-        robot.logger.info(f"Moving arm to position [{sh0},{sh1},{el0},{el1},{wr0},{wr1}]")
+        robot.logger.info(f"Moving arm to position [{sh0},{sh1},{el0},{el1},{wr0},{wr1}].")
 
         block_until_arm_arrives(command_client, cmd_id, timeout_sec=10)
-        print("Arm finished moving")
+        print("Arm finished moving.")
+
+    
+    def arm_move(self, x, y, z, qw, qx, qy, qz,
+                rframe: str, tf: geometry_pb2.FrameTreeSnapshot = None) -> None:
+        """
+        Directs the arm to move to a point in space
+        @param x, y, z: type float, position in space relative to frame
+        @param qw, qx, qy, qz: type float, rotation in space relative to frame
+        @frame rframe: type str, name of the reference frame
+        """
+        robot = self.robot
+
+        #check estop here
+        assert not robot.is_estopped(), "Robot is estopped. Please use an external E-Stop client, " \
+                                        "such as the estop SDK example, to configure E-Stop."
+        assert robot.has_arm(), "Robot requires an arm to run this client."
+
+        command_client = robot.ensure_client(RobotCommandClient.default_service_name)
+        robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
+
+        #power on
+        if not robot.is_powered_on():
+            robot.logger.info("Powering on robot... This may take a several seconds.")
+            robot.power_on(timeout_sec=20)
+            assert robot.is_powered_on(), "Robot power on failed."
+            robot.logger.info("Robot powered on.")
+        
+        #stand
+        robot.logger.info("Commanding robot to stand...")
+        blocking_stand(command_client, timeout_sec=10)
+        robot.logger.info("Robot standing.")
+
+        hand_ewrt_rframe = geometry_pb2.Vec3(x=x, y=y, z=z)
+        rframe_Q_hand = geometry_pb2.Quaternion(qw, qx, qy, qz)
+        rframe_T_hand = geometry_pb2.SE3Pose(position=hand_ewrt_rframe, rotation=rframe_Q_hand)
+
+        if tf is None:
+            robot_state = robot_state_client.get_robot_state()
+            tf = robot_state.kinematic_state.transforms_snapshot
+
+        body_T_cam = get_a_tform_b(tf, GRAV_ALIGNED_BODY_FRAME_NAME, rframe)
+        body_T_hand = body_T_cam * math_helpers.SE3Pose.from_obj(rframe_T_hand)
+
+        arm_command = RobotCommandBuilder.arm_pose_command(
+            body_T_hand.x, body_T_hand.y, body_T_hand.z,
+            body_T_hand.rot.x, body_T_hand.rot.y, body_T_hand.rot.z, body_T_hand.rot.w, GRAV_ALIGNED_BODY_FRAME_NAME
+        )
+
+        cmd_id = command_client.robot_command(arm_command)
+        robot.logger.info("Moving arm...")
+
+        block_until_arm_arrives(command_client, cmd_id, 10)
+        robot.logger.info("Finished moving.")
 
 
-    def stow_arm(self):
+    def stow_arm(self) -> None:
+        """
+        Stows the arm
+        """
         robot = self.robot
 
         assert robot.has_arm(), "Robot requires an arm to run this client."
@@ -101,7 +152,6 @@ class ArmClient:
         assert not robot.is_estopped(), "Robot is estopped. Please use an external E-Stop client, " \
                                         "such as the estop SDK example, to configure E-Stop."
 
-        robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
         command_client = robot.ensure_client(RobotCommandClient.default_service_name)
         
         if not robot.is_powered_on():
@@ -114,13 +164,14 @@ class ArmClient:
         stow_command_id = command_client.robot_command(stow)
         robot.logger.info("Stow command issued.")
         block_until_arm_arrives(command_client, stow_command_id, 3.0)
+        robot.logger.info("Arm stowed.")
 
 
 #------Testing----------
 
 def main(argv):
     """Command line interface."""
-    from spot_dock_undock import DockingClient
+    from spot_docking_client import DockingClient
 
     parser = argparse.ArgumentParser()
     bosdyn.client.util.add_base_arguments(parser)

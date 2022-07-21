@@ -13,7 +13,7 @@ import bosdyn.client.util
 
 import rospy
 
-from spot_screwdriver_orientation import ArmClient
+from spot_arm_client import ArmClient
 from spot_screwdriver.srv import ScrewdriverOrientationSrv, ScrewdriverOrientationSrvRequest, ScrewdriverOrientationSrvResponse
 
 get_screwdriver_orientation = None
