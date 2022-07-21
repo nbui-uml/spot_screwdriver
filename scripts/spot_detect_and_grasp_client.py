@@ -10,13 +10,15 @@ import bosdyn.client
 import bosdyn.client.estop
 import bosdyn.client.lease
 import bosdyn.client.util
-from bosdyn.api import estop_pb2, geometry_pb2, image_pb2, manipulation_api_pb2
+from bosdyn.api import estop_pb2, geometry_pb2, image_pb2, manipulation_api_pb2, gripper_camera_param_pb2
 from bosdyn.client.estop import EstopClient
 from bosdyn.client.frame_helpers import VISION_FRAME_NAME, get_vision_tform_body, math_helpers, get_a_tform_b, GRAV_ALIGNED_BODY_FRAME_NAME
-from bosdyn.client.image import ImageClient
+from bosdyn.client.image import ImageClient, build_image_request
 from bosdyn.client.manipulation_api_client import ManipulationApiClient
 from bosdyn.client.robot_command import RobotCommandClient, RobotCommandBuilder, blocking_stand, block_until_arm_arrives
 from bosdyn.client.robot_state import RobotStateClient
+from bosdyn.client.gripper_camera_param import GripperCameraParamClient
+from google.protobuf import wrappers_pb2
 
 from spot_arm_client import ArmClient
 
@@ -77,7 +79,8 @@ class DetectAndGraspClient:
         robot.logger.info("Robot standing.")
 
         robot.logger.info("Getting images")
-        image_responses = image_client.get_image_from_sources(self.image_sources)
+        image_quality = 75
+        image_responses = image_client.get_image([build_image_request(source, image_quality) for source in self.image_sources])
 
         #check if images were received
         assert len(image_responses), "Unable to get images."
@@ -145,10 +148,23 @@ class DetectAndGraspClient:
         """
         robot = self.robot
 
+        gripper_camera_param_client = robot.ensure_client(GripperCameraParamClient.default_service_name)
+
         x, y, z = bosdyn.client.image.pixel_to_camera_space(image, pixel_x, pixel_y)
         print(f"Object at {(x, y, z)} to camera frame")
         
+        #bring arm above object
         self.arm_to_above_object(image, pixel_x, pixel_y)
+
+        #illuminate object and container
+        gripper_camera_brightness = wrappers_pb2.FloatValue(0.75)
+        gripper_camera_params = gripper_camera_param_pb2.GripperCameraParams(brightness=gripper_camera_brightness)
+        gripper_camera_param_request = gripper_camera_param_pb2.GripperCameraGetParamRequest(params=gripper_camera_params)
+        gripper_camera_param_response = gripper_camera_param_client.set_camera_params(gripper_camera_param_request)
+
+        time.sleep(2)
+
+        #get gripper image
 
             
     def arm_to_above_object(self, image: image_pb2.Image, pixel_x: int, pixel_y: int) -> None:
