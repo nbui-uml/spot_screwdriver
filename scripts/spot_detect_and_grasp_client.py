@@ -2,15 +2,17 @@ import argparse
 import sys
 import os
 import time
+from typing import Any
 
 import cv2
+from matplotlib.pyplot import close
 import numpy as np
 
 import bosdyn.client
 import bosdyn.client.estop
 import bosdyn.client.lease
 import bosdyn.client.util
-from bosdyn.api import estop_pb2, geometry_pb2, image_pb2, manipulation_api_pb2, gripper_camera_param_pb2
+from bosdyn.api import estop_pb2, geometry_pb2, image_pb2, manipulation_api_pb2, gripper_camera_param_pb2, gripper_command_pb2
 from bosdyn.client.estop import EstopClient
 from bosdyn.client.frame_helpers import VISION_FRAME_NAME, get_vision_tform_body, math_helpers, get_a_tform_b, GRAV_ALIGNED_BODY_FRAME_NAME
 from bosdyn.client.image import ImageClient, build_image_request
@@ -86,16 +88,7 @@ class DetectAndGraspClient:
         assert len(image_responses), "Unable to get images."
         
         for image in image_responses:
-            #format image to cv2
-            if image.shot.image.pixel_format == image_pb2.Image.PIXEL_FORMAT_DEPTH_U16:
-                dtype = np.uint16
-            else:
-                dtype = np.uint8
-            img = np.fromstring(image.shot.image.data, dtype=dtype)
-            if image.shot.image.format == image_pb2.Image.FORMAT_RAW:
-                img = img.reshape(image.shot.image.rows, image.shot.image.cols)
-            else:
-                img = cv2.imdecode(img, -1)
+            img = self.format_spotImage_to_cv2(image)
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
             #send image through detection model
@@ -140,15 +133,25 @@ class DetectAndGraspClient:
         return False
 
 
-    def grasp_from_image(self, image: image_pb2.Image, pixel_x: int, pixel_y: int, clip: np.ndarray) -> None:
+    def grasp_from_image(self, image: image_pb2.ImageResponse, pixel_x: int, pixel_y: int) -> None:
         """
         Attempts a grasp at a position defined in the image.
-        @param image: type image_pb2.Image, image from Image service.
-        @param pixel_x, pixel_y: type int, positions defined in image.
+
+        Parameters
+        -----
+            image: image_pb2.ImageResponse
+                ImageResponse from Image service.
+            pixel_x: int
+                x position in image.
+            pixel_y: int
+                y position in image.
+
+        Returns
+        -----
+        None
         """
         robot = self.robot
-
-        gripper_camera_param_client = robot.ensure_client(GripperCameraParamClient.default_service_name)
+        command_client = robot.ensure_client(RobotCommandClient.default_service_name)
 
         x, y, z = bosdyn.client.image.pixel_to_camera_space(image, pixel_x, pixel_y)
         print(f"Object at {(x, y, z)} to camera frame")
@@ -156,6 +159,42 @@ class DetectAndGraspClient:
         #bring arm above object
         self.arm_to_above_object(image, pixel_x, pixel_y)
 
+        x, y, z, image = self.position_on_gripper_camera()
+        
+        arm_client = ArmClient(self.config, robot)
+        arm_client.arm_move(x, y, z - 0.2, 1, 0, 0, 0, image.shot.frame_name_image_sensor, image.shot.transforms_snapeshot)
+
+        open_command = RobotCommandBuilder.claw_gripper_open_command()
+        cmd_id = command_client.robot_command(open_command)
+        robot.logger.info("Opening claw...")
+        time.sleep(1)
+
+        arm_client.arm_move(x, y, z, 1, 0, 0, 0, image.shot.frame_name_image_sensor, image.shot.transforms_snapeshot)
+
+        close_command = RobotCommandBuilder.claw_gripper_close_command()
+        cmd_id = command_client.robot_command(close_command)
+        robot.logger.info("Grasping.")
+
+        arm_client.arm_move(x, y, z - 0.4, 1, 0, 0, 0, image.shot.frame_name_image_sensor, image.shot.transforms_snapeshot)
+        
+
+    def position_on_gripper_camera(self) -> Any:
+        """
+        Calculates the position of the screwdriver in relation to the gripper camera.
+        
+        Returns
+        ------
+        tuple
+            x: float
+            y: float
+            z: float
+            image: image_pb2.ImageResponse
+        """
+        robot = self.robot
+
+        gripper_camera_param_client = robot.ensure_client(GripperCameraParamClient.default_service_name)
+        image_client = robot.ensure_client(ImageClient.default_service_name)
+        
         #illuminate object and container
         gripper_camera_brightness = wrappers_pb2.FloatValue(0.75)
         gripper_camera_params = gripper_camera_param_pb2.GripperCameraParams(brightness=gripper_camera_brightness)
@@ -165,12 +204,68 @@ class DetectAndGraspClient:
         time.sleep(2)
 
         #get gripper image
+        robot.logger.info("Getting images")
+        image_quality = 75
+        image_responses = image_client.get_image([build_image_request("hand_color_image", image_quality)])
 
+        #check if images were received
+        assert len(image_responses) == 1, "Unable to get valid images."
+
+        image = image_responses[0]
+        img = self.format_spotImage_to_cv2(image)
+
+        #analysis algorithm
+        img = cv2.GaussianBlur(img, (5,5), 1)
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        lower_range = np.array([0,0,100])
+        upper_range = np.array([255,50,255])
+        mask = cv2.inRange(hsv, lower_range, upper_range)
+        mask = cv2.bitwise_not(mask)
+        circles = cv2.HoughCircles(mask, cv2.HOUGH_GRADIENT, 1, 50, param1=100, param2=30, minRadius=100, maxRadius=500)
+
+        clip = None
+        clipy = None
+        clipx = None
+        if circles is not None:
+            circles = np.uint16(np.around(circles))
+            for i in circles[0, :]:
+                center = (i[0], i[1])
+                # circle center
+                #cv2.circle(img, center, 1, (0, 100, 100), 3)
+                # circle outline
+                radius = i[2]
+                cv2.circle(img, center, radius, (255, 0, 255), 3)
+                radius = radius // 2
+                clip = mask[center[1] - radius : center[1] + radius, center[0] - radius : center[0] + radius]
+                clipy = center[1] - radius
+                clipx = center[0] - radius
+
+        averages = np.zeros((4,4))
+        hstep = clip.shape[0] // 4
+        wstep = clip.shape[1] // 4
+        for y in range(4):
+            for x in range(4):
+                section = clip[y * hstep : (y+1) * hstep, x * wstep : (x+1) * wstep]
+                averages[y][x] = np.average(section)
+
+        zones = np.zeros((3,3))
+        for y in range(3):
+            for x in range(3):
+                zones[y][x] = np.sum(averages[y : y + 1, x : x + 1])
+
+        i,j = np.unravel_index(zones.argmax(), zones.shape)
+        pixel_y = clipy + int((i + 0.5) * (clip.shape[0] // 3))
+        pixel_x = clipx + int((j + 0.5) * (clip.shape[1] // 3))
+
+        x, y, z = bosdyn.client.image.pixel_to_camera_space(image, pixel_x, pixel_y)
+
+        return x, y, z, image
             
-    def arm_to_above_object(self, image: image_pb2.Image, pixel_x: int, pixel_y: int) -> None:
+
+    def arm_to_above_object(self, image: image_pb2.ImageResponse, pixel_x: int, pixel_y: int) -> None:
         """
         Move arm above a point in the image.
-        @param image: type image_pb2.Image, image from Image service.
+        @param image: type image_pb2.ImageResponse, image from Image service.
         @param pixel_x, pixel_y: type int, positions defined in image.
         """
         robot = self.robot
@@ -262,14 +357,26 @@ class DetectAndGraspClient:
         result[0:row, 0:col] = frame
         return result
 
+    def format_spotImage_to_cv2(image: image_pb2.ImageResponse) -> cv2.Mat:
+        #format image to cv2
+        if image.shot.image.pixel_format == image_pb2.Image.PIXEL_FORMAT_DEPTH_U16:
+            dtype = np.uint16
+        else:
+            dtype = np.uint8
+        img = np.fromstring(image.shot.image.data, dtype=dtype)
+        if image.shot.image.format == image_pb2.Image.FORMAT_RAW:
+            img = img.reshape(image.shot.image.rows, image.shot.image.cols)
+        else:
+            img = cv2.imdecode(img, -1)
+        return img
 
 #-----Testing-----
 
 
 def main(argv):
     """Command line interface."""
-    from scripts.spot_docking_client import DockingClient
-    from scripts.spot_arm_client import ArmClient
+    from spot_docking_client import DockingClient
+    from spot_arm_client import ArmClient
 
     parser = argparse.ArgumentParser()
     bosdyn.client.util.add_base_arguments(parser)
