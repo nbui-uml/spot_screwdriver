@@ -29,10 +29,15 @@ class DetectAndGraspClient:
     def __init__(self, config: argparse.Namespace, robot: bosdyn.client.Robot) -> None:
         """
         Intializes DetectAndGraspClient instance.
-        Config parameters:
+
+        Parameters
+        -----
+        config: Namespace
             bosdyn.client.util base arguments
-            config.net: location of YOLOv5 ONNX file
-        @param robot: type bosdyn.client.Robot, the robot instance.
+            config.net: str
+                Location of YOLOv5 ONNX file.
+        robot: Robot
+            The robot instance.
         """
         #robot stuff
         self.config = config
@@ -57,6 +62,10 @@ class DetectAndGraspClient:
         """
         Iterates through the camera searching for a screwdriver. Will attempt to grasp the screwdriver if one is found.
         Returns True if successful, False otherwise.
+
+        Returns
+        -----
+        bool
         """
         
         robot = self.robot
@@ -265,8 +274,15 @@ class DetectAndGraspClient:
     def arm_to_above_object(self, image: image_pb2.ImageResponse, pixel_x: int, pixel_y: int) -> None:
         """
         Move arm above a point in the image.
-        @param image: type image_pb2.ImageResponse, image from Image service.
-        @param pixel_x, pixel_y: type int, positions defined in image.
+
+        Parameters
+        -----
+        image: ImageResponse
+            Image from Image service.
+        pixel_x: int
+            X position in image.
+        pixel_y: int
+            Y position in image.
         """
         robot = self.robot
         arm_client = ArmClient(self.config, robot)
@@ -287,7 +303,19 @@ class DetectAndGraspClient:
 
     def detect(self, image: np.ndarray, net: cv2.dnn.Net) -> np.ndarray:
         """
-        Puts the image through the DNN
+        Puts the image through the DNN.
+
+        Parameters
+        -----
+        image: ndarry
+            Formatted image for DNN.
+        net: dnn.Net
+            DNN net object.
+        
+        Returns
+        -----
+        ndarry
+            Result of detection model.
         """
         blob = cv2.dnn.blobFromImage(image, 1/255.0, (self.INPUT_WIDTH, self.INPUT_HEIGHT), crop=False)
         net.setInput(blob)
@@ -297,7 +325,21 @@ class DetectAndGraspClient:
 
     def wrap_detection(self, input_image: np.ndarray, output_data: np.ndarray) -> tuple:
         """
-        Parses output data from DNN and returns result_class_ids, result_confidences, result_boxes.
+        Parses output data from DNN.
+        
+        Parameters
+        -----
+        input_image: ndarray
+            Original cv2 image.
+        output_data: ndarray
+            Output from DNN.
+
+        Returns
+        -----
+        tuple
+            result_class_ids: list 
+            result_confidences: list
+            result_boxes: list
         """
         class_ids = []
         confidences = []
@@ -349,8 +391,17 @@ class DetectAndGraspClient:
     def format_yolov5(self, frame: np.ndarray) -> np.ndarray:
         """
         Pads image for YOLOv5.
-        """
+
+        Parameters
+        -----
+        frame: ndarray
+            Raw cv2 image.
         
+        Returns
+        -----
+        ndarray
+            Formatted cv2 image for YOLOv5 model.
+        """ 
         row, col, _ = frame.shape
         _max = max(col, row)
         result = np.zeros((_max, _max, 3), np.uint8)
@@ -358,7 +409,19 @@ class DetectAndGraspClient:
         return result
 
     def format_spotImage_to_cv2(image: image_pb2.ImageResponse) -> cv2.Mat:
-        #format image to cv2
+        """
+        Format Spot Image to cv2.
+
+        Parameters
+        -----
+        image: ImageResponse
+            Image from Spot
+        
+        Returns
+        -----
+        ndarray
+            cv2 formatted image.
+        """
         if image.shot.image.pixel_format == image_pb2.Image.PIXEL_FORMAT_DEPTH_U16:
             dtype = np.uint16
         else:

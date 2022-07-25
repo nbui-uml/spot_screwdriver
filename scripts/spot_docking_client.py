@@ -9,7 +9,12 @@ class DockingClient:
     def __init__(self, config: argparse.Namespace, robot: bosdyn.client.Robot) -> None:
         """
         Creates a DockingClient instance.
-        @param robot: type bosdyn.client.Robot, the robot instance.
+
+        Parameters
+        -----
+        config: Namespace
+        robot: Robot
+            The robot instance.
         """
         self.sdk = bosdyn.client.create_standard_sdk("DockingClient")
         self.robot = robot
@@ -18,7 +23,10 @@ class DockingClient:
     def dock(self, dock_id: int) -> None:
         """
         Commands the robot to dock at the location specified by dock_id.
-        @param dock_id: type int, ID of the dock to go to.
+        Parameters
+        -----
+        dock_id: int 
+            ID of the dock to go to.
         """
 
         robot = self.robot

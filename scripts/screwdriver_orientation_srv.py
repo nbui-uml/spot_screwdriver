@@ -35,7 +35,11 @@ tf_broadcaster = None
 def publish_transform_from_angle(angle: float) -> None:  
     """
     Publishes the tf frame from the gripper link to the screwdriver head.
-    @param angle: type float, angle of the the screwdriver head in degrees.
+
+    Parameters
+    -----
+        angle: float
+            Angle of the the screwdriver head in degrees.
     """  
     #init tf object
     static_tf_stamped = geometry_msgs.msg.TransformStamped()
@@ -63,8 +67,16 @@ def publish_transform_from_angle(angle: float) -> None:
 def angle_from_raw_image(img: cv2.Mat) -> float:
     """
     Calculates the angle from the camera data.
-    @param img: type cv2.Mat, image data from camera
-    @return: type float, calculated angle of screwdriver; returns 400.0 if unable to calculate angle.
+
+    Parameters
+    -----
+    img: ndarray 
+        Image data from camera
+
+    Returns
+    -----
+    float
+        Calculated angle of screwdriver. Returns 400.0 if unable to calculate angle.
     """
     #detect screwdriver
     height, width, channels = img.shape
@@ -78,14 +90,6 @@ def angle_from_raw_image(img: cv2.Mat) -> float:
     if len(found) == 1:
         #resize to square for orientation classifier
         x, y, w, h = found[0]
-        
-        """
-        cpy = img.copy()
-        cv2.rectangle(cpy, (x,y), (x+w,y+h), (0,0,255))
-        cv2.imshow("C", cpy)
-        cv2.waitKey(2000)
-        cv2.destroyAllWindows()
-        """
 
         l = (w + h) // 2
         print(f"l: {l}, w: {w}, h: {h}")
@@ -101,7 +105,17 @@ def angle_from_raw_image(img: cv2.Mat) -> float:
 
 def imgmsg_to_cv2(img_msg):
     """
-    Helper function because I can't get CvBridge.imgmsg_to_cv2 to work.
+    Convert ROS Image msg to cv2.
+
+    Parameters
+    -----
+    img_msg: Image
+        ROS Image message
+
+    Returns
+    -----
+    ndarry
+        cv2 formatted image.
     """
     dtype = np.dtype("uint8") # Hardcode to 8 bits...
     dtype = dtype.newbyteorder('>' if img_msg.is_bigendian else '<')
@@ -118,8 +132,14 @@ def screwdriver_orientationCB(req: ScrewdriverOrientationSrvRequest) -> Screwdri
     Callback for the service request.
     Precondition: The arm is positioned in front of the head where the screwdriver can be viewed head-on.
     Postcondition: A transform frame from the tip of the screwdriver to the gripper is created and published.
-    @param req: type ScrewdriverOrientationSrvRequest from spot_screwdriver.srv
-    @return: type ScrewdriverOrientationSrvResponse from spot_screwdriver.srv
+
+    Parameters
+    -----
+    req: ScrewdriverOrientationSrvRequest
+
+    Returns
+    -----
+    ScrewdriverOrientationSrvResponse
     """
     angle = 400.0
     tries = 0

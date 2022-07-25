@@ -17,9 +17,19 @@ from bosdyn.client.robot_state import RobotStateClient
 
 
 def make_robot_command(arm_joint_traj: arm_command_pb2.ArmJointTrajectory) -> synchronized_command_pb2.SynchronizedCommand:
-    """ Helper function to create a RobotCommand from an ArmJointTrajectory.
+    """ 
+    Helper function to create a RobotCommand from an ArmJointTrajectory.
         The returned command will be a SynchronizedCommand with an ArmJointMoveCommand
-        filled out to follow the passed in trajectory. """
+        filled out to follow the passed in trajectory. 
+
+    Parameters
+    -----
+    arm_joint_traj: ArmJointTrajectory
+
+    Returns
+    -----
+    SynchronizedCommand    
+    """
 
     joint_move_command = arm_command_pb2.ArmJointMoveCommand.Request(trajectory=arm_joint_traj)
     arm_command = arm_command_pb2.ArmCommand.Request(arm_joint_move_command=joint_move_command)
@@ -46,10 +56,15 @@ class ArmClient:
         assert not self.robot.is_powered_on(), "Robot power off failed."
         self.robot.logger.info("Robot safely powered off.")
 
+
     def joint_move(self, sh0, sh1, el0, el1, wr0, wr1) -> None:
         """
-        Directs the arm to a specified joint position
-        @param sh0, sh1, el0, el1, wr0, wr1: type float, joint position
+        Directs the arm to a specified joint position.
+        
+        Parameters
+        -----
+        sh0, sh1, el0, el1, wr0, wr1: float
+            Joint position.
         """
         robot = self.robot
 
@@ -89,10 +104,18 @@ class ArmClient:
     def arm_move(self, x, y, z, qw, qx, qy, qz,
                 rframe: str, tf: geometry_pb2.FrameTreeSnapshot = None) -> None:
         """
-        Directs the arm to move to a point in space
-        @param x, y, z: type float, position in space relative to frame
-        @param qw, qx, qy, qz: type float, rotation in space relative to frame
-        @frame rframe: type str, name of the reference frame
+        Directs the arm to move to a point in space.
+
+        Parameters
+        -----
+        x, y, z: float
+            Position in space relative to frame.
+        qw, qx, qy, qz: float
+            Rotation in space relative to frame.
+        rframe: str
+            Name of the reference frame.
+        tf: FrameTreeSnapshot
+            Transform tree.
         """
         robot = self.robot
 
@@ -141,7 +164,7 @@ class ArmClient:
 
     def stow_arm(self) -> None:
         """
-        Stows the arm
+        Stows the arm.
         """
         robot = self.robot
 
