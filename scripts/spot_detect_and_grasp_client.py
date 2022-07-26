@@ -14,7 +14,7 @@ import bosdyn.client.lease
 import bosdyn.client.util
 from bosdyn.api import estop_pb2, geometry_pb2, image_pb2, manipulation_api_pb2, gripper_camera_param_pb2, gripper_command_pb2
 from bosdyn.client.estop import EstopClient
-from bosdyn.client.frame_helpers import VISION_FRAME_NAME, get_vision_tform_body, math_helpers, get_a_tform_b, GRAV_ALIGNED_BODY_FRAME_NAME
+from bosdyn.client.frame_helpers import VISION_FRAME_NAME, get_vision_tform_body, math_helpers, get_a_tform_b, GRAV_ALIGNED_BODY_FRAME_NAME, ODOM_FRAME_NAME
 from bosdyn.client.image import ImageClient, build_image_request
 from bosdyn.client.manipulation_api_client import ManipulationApiClient
 from bosdyn.client.robot_command import RobotCommandClient, RobotCommandBuilder, blocking_stand, block_until_arm_arrives
@@ -26,7 +26,7 @@ from spot_arm_client import ArmClient
 
 
 class DetectAndGraspClient:
-    def __init__(self, config: argparse.Namespace, robot: bosdyn.client.Robot) -> None:
+    def __init__(self, config: argparse.Namespace, robot: bosdyn.client.Robot, net: str = None) -> None:
         """
         Intializes DetectAndGraspClient instance.
 
@@ -41,7 +41,6 @@ class DetectAndGraspClient:
         """
         #robot stuff
         self.config = config
-        self.sdk = bosdyn.client.create_standard_sdk("GraspingClient")
         self.robot = robot
 
         self.image_sources = [
@@ -49,13 +48,21 @@ class DetectAndGraspClient:
             "frontright_fisheye_image"
         ]
 
+        #type SE3Pose
+        self.poses_in_odom = {
+            "container": None
+        }
+
+        if not net:
+            net = "/home/csrobot/catkin_ws/src/spot_screwdriver/models/screwdriver_yolo5.onnx"
+
         #detection model stuff
         self.INPUT_WIDTH = 640
         self.INPUT_HEIGHT = 640
         self.SCORE_THRESHOLD = 0.25
         self.NMS_THRESHOLD = 0.45
         self.CONFIDENCE_THRESHOLD = 0.5
-        self.net = cv2.dnn.readNet(config.net)
+        self.net = cv2.dnn.readNet(net)
 
 
     def detect_and_grasp(self) -> bool:
@@ -154,10 +161,6 @@ class DetectAndGraspClient:
                 x position in image.
             pixel_y: int
                 y position in image.
-
-        Returns
-        -----
-        None
         """
         robot = self.robot
         command_client = robot.ensure_client(RobotCommandClient.default_service_name)
@@ -179,6 +182,7 @@ class DetectAndGraspClient:
         time.sleep(1)
 
         arm_client.arm_move(x, y, z, 1, 0, 0, 0, image.shot.frame_name_image_sensor, image.shot.transforms_snapeshot)
+        self.save_pose_to_odom(x, y, z, 1, 0, 0, 0, "container", image.shot.frame_name_image_sensor, image.shot.transforms_snapeshot)
 
         close_command = RobotCommandBuilder.claw_gripper_close_command()
         cmd_id = command_client.robot_command(close_command)
@@ -296,9 +300,65 @@ class DetectAndGraspClient:
 
         arm_client.arm_move(
             x, y, z, 
-            hand_T_body.rot.x, hand_T_body.rot.y, hand_T_body.rot.z, hand_T_body.rot.w,
+            hand_T_body.rot.w, hand_T_body.rot.x, hand_T_body.rot.y, hand_T_body.rot.z, 
             image.shot.frame_name_image_sensor, image.shot.transforms_snapshot
         )
+
+
+    def return_object_to_container(self) -> None:
+        """
+        Returns the object to the container whose pose is saved in self.poses_in_odom["container"]
+        """
+        robot = self.robot
+        command_client = robot.ensure_client(RobotCommandClient.default_service_name)
+        arm_client = ArmClient()
+
+        pose = self.poses_in_odom["container"]
+        assert pose, "Returning object to container requires a saved pose."
+
+        arm_client.arm_move(pose.x, pose.y, pose.z + 0.2, pose.rot.w, pose.rot.x, pose.rot.y, pose.rot.z, ODOM_FRAME_NAME)
+
+        arm_client.arm_move(pose.x, pose.y, pose.z, pose.rot.w, pose.rot.x, pose.rot.y, pose.rot.z, ODOM_FRAME_NAME)
+
+        open_command = RobotCommandBuilder.claw_gripper_open_command()
+        cmd_id = command_client.robot_command(open_command)
+        robot.logger.info("Opening gripper.")
+
+        arm_client.arm_move(pose.x, pose.y, pose.z + 0.3, pose.rot.w, pose.rot.x, pose.rot.y, pose.rot.z, ODOM_FRAME_NAME)
+
+
+    def save_pose_to_odom(self, x, y, z, qw, qx, qy, qz, name: str, rframe: str, tf: geometry_pb2.FrameTreeSnapshot = None) -> None:
+        """
+        Saves the pose in reference to odom in self.poses_in_odom.
+
+        Parameters
+        -----
+            x, y, z: float
+                Position in reference to the frame.
+            qw, qx, qy, qz: float
+                Orientation in reference to the frame.
+            name: str
+                Name of the pose.
+            rframe: str
+                Name of the reference frame.
+            tf: FrameTreeSnapshot
+                FrameTreeSnapshot when pose was recorded.
+        """
+        robot = self.robot
+        robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
+
+        hand_ewrt_rframe = geometry_pb2.Vec3(x=x, y=y, z=z)
+        rframe_Q_hand = geometry_pb2.Quaternion(qw, qx, qy, qz)
+        rframe_T_hand = geometry_pb2.SE3Pose(position=hand_ewrt_rframe, rotation=rframe_Q_hand)
+
+        if tf is None:
+            robot_state = robot_state_client.get_robot_state()
+            tf = robot_state.kinematic_state.transforms_snapshot
+
+        odom_T_rframe = get_a_tform_b(tf, ODOM_FRAME_NAME, rframe)
+        odom_T_hand = odom_T_rframe * math_helpers.SE3Pose.from_obj(rframe_T_hand)
+
+        self.poses_in_odom[name] = odom_T_hand
 
 
     def detect(self, image: np.ndarray, net: cv2.dnn.Net) -> np.ndarray:
@@ -408,6 +468,7 @@ class DetectAndGraspClient:
         result[0:row, 0:col] = frame
         return result
 
+
     def format_spotImage_to_cv2(image: image_pb2.ImageResponse) -> cv2.Mat:
         """
         Format Spot Image to cv2.
@@ -433,6 +494,7 @@ class DetectAndGraspClient:
             img = cv2.imdecode(img, -1)
         return img
 
+
 #-----Testing-----
 
 
@@ -446,37 +508,46 @@ def main(argv):
     parser.add_argument("--net", help="Path to yolov5 ONNX file",  
         default="/home/csrobot/catkin_ws/src/spot_screwdriver/models/screwdriver_yolo5.onnx")
     options = parser.parse_args(argv)
-    #try: #get lease here and do stuff
-        #docking_client = DockingClient(options)
-    grasping_client = DetectAndGraspClient(options)
-        #arm_client = ArmClient(options)
+    
+    sdk = bosdyn.client.create_standard_sdk("GraspingClient")
+    robot = sdk.create_robot(options)
+    bosdyn.client.util.authenticate(robot)
+    robot.time_sync.wait_for_sync()
+
+    docking_client = DockingClient(options, robot)
+    grasping_client = DetectAndGraspClient(options, robot, options.net)
+    arm_client = ArmClient(options, robot)
     lease_client = grasping_client.robot.ensure_client(bosdyn.client.lease.LeaseClient.default_service_name)
-        #with bosdyn.client.lease.LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True):
-            #undock
-            #docking_client.undock()
+    try:
+        with bosdyn.client.lease.LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True):
+            docking_client.undock()
 
-    input("Press any key to continue")
+            input("Press any key to continue")
 
-    while True:
-        success = grasping_client.detect_and_grasp()
-        if success == True:
-            print("Screwdriver found")
-        else:
-            print("Unable to find screwdriver")
-        if input("Try again? (y/n)").lower() == "n":
-            break
+            while True:
+                success = grasping_client.detect_and_grasp()
+                if success == True:
+                    print("Screwdriver found and grasped.")
+                else:
+                    print("Unable to find screwdriver")
+                if input("Try again? (y/n)").lower() == "n":
+                    break
 
-            #arm_client.stow_arm()
+            input("Press any key to continue")
+
+            grasping_client.return_object_to_container()
+
+            input("Press any key to continue")
+
+            arm_client.stow_arm()
 
             #dock
-            #docking_client.dock(520)
-        #return True
-        """
+            docking_client.dock(520)
+            return True
     except Exception as exc:  # pylint: disable=broad-except
         logger = bosdyn.client.util.get_logger()
         logger.exception("Threw an exception")
         return False
-        """
 
 if __name__ == '__main__':
     if not main(sys.argv[1:]):
