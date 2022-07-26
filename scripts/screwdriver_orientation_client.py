@@ -14,6 +14,8 @@ import bosdyn.client.util
 import rospy
 
 from spot_arm_client import ArmClient
+from spot_docking_client import DockingClient
+from spot_detect_and_grasp_client import DetectAndGraspClient
 from spot_screwdriver.srv import ScrewdriverOrientationSrv, ScrewdriverOrientationSrvRequest, ScrewdriverOrientationSrvResponse
 
 get_screwdriver_orientation = None
@@ -27,8 +29,16 @@ def main(argv) -> int:
     bosdyn.client.util.add_base_arguments(parser)
     options = parser.parse_args(argv)
     bosdyn_logger = bosdyn.client.util.get_logger()
+
+    sdk = bosdyn.client.create_standard_sdk("GraspingClient")
+    robot = sdk.create_robot(options)
+    bosdyn.client.util.authenticate(robot)
+    robot.time_sync.wait_for_sync()
+
     try:
-        arm_client = ArmClient(options)
+        arm_client = ArmClient(options, robot)
+        grasping_client = DetectAndGraspClient(options, robot)
+        docking_client = DockingClient(options, robot)
     except Exception as e:
         bosdyn_logger.exception("Could not initialize ArmClient")
         return FAILURE
