@@ -40,7 +40,7 @@ def make_robot_command(arm_joint_traj: arm_command_pb2.ArmJointTrajectory) -> sy
 
 class ArmClient:
     def __init__(self, config: argparse.Namespace, robot: bosdyn.client.Robot) -> None:
-        self.sdk = bosdyn.client.create_standard_sdk("SpotArmClient")
+        self.config = config
         self.robot = robot
 
         self.joint_states = {
@@ -195,14 +195,19 @@ class ArmClient:
 def main(argv):
     """Command line interface."""
     from spot_docking_client import DockingClient
+    from bosdyn.client.robot_state import RobotStateClient
 
     parser = argparse.ArgumentParser()
     bosdyn.client.util.add_base_arguments(parser)
     options = parser.parse_args(argv)
+
+    sdk = bosdyn.client.create_standard_sdk("SpotArmClient")
+    robot = sdk.create_robot(options.hostname)
     try: #get lease here and do stuff
-        arm_client = ArmClient(options)
-        docking_client = DockingClient(options)
-        lease_client = arm_client.robot.ensure_client(bosdyn.client.lease.LeaseClient.default_service_name)
+        arm_client = ArmClient(options, robot)
+        docking_client = DockingClient(options, robot)
+        lease_client = robot.ensure_client(bosdyn.client.lease.LeaseClient.default_service_name)
+        robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
         with bosdyn.client.lease.LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True):
             #undock
             docking_client.undock()
@@ -212,15 +217,22 @@ def main(argv):
             arm_client.arm_to_pose(sh0,sh1,el0,el1,wr0,wr1)
             
             #wait
-            input("Press any key to continue")
+            input("Press any key to continue...")
 
             #stow arm
             arm_client.stow_arm()
 
+            #to front of camera
+            robot_state = robot_state_client.get_robot_state()
+            arm_client.arm_move(0,0,0.3,0,1,0,0,"frontright_fisheye", robot_state.kinematic_state.transforms_snapshot)
+
+            input("Press any key to continue...")
+
+            #stow arm again 
+            arm_client.stow_arm()
+
             #dock
             docking_client.dock(520)
-
-            arm_client.power_off_safe()
         return True
     except Exception as exc:  # pylint: disable=broad-except
         logger = bosdyn.client.util.get_logger()
