@@ -45,7 +45,9 @@ class ArmClient:
         self.robot = robot
 
         self.joint_states = {
-            "front": (0.0,-0.328,1.611,-0.049,1.825,0.0),
+            "front": (0.0,-0.328,1.611,0.0,1.825,0.0),
+            "frontright": (0.448,-0.328,1.611,-0.15,1.825,0.0),
+            "frontleft": (-0.448,-0.328,1.611,0.15,1.825,0.0),
             "ready": (0.0, -1.57, 1.57, 0.0, 0.0, 0.0)
         }
 
@@ -192,6 +194,31 @@ class ArmClient:
         block_until_arm_arrives(command_client, stow_command_id, 3.0)
         robot.logger.info("Arm stowed.")
 
+    
+    def carry_position(self) -> None:
+        robot = self.robot
+
+        assert robot.has_arm(), "Robot requires an arm to run this client."
+
+        # Verify the robot is not estopped and that an external application has registered and holds
+        # an estop endpoint.
+        assert not robot.is_estopped(), "Robot is estopped. Please use an external E-Stop client, " \
+                                        "such as the estop SDK example, to configure E-Stop."
+
+        command_client = robot.ensure_client(RobotCommandClient.default_service_name)
+        
+        if not robot.is_powered_on():
+            robot.logger.info("Powering on robot... This may take a several seconds.")
+            robot.power_on(timeout_sec=20)
+            assert robot.is_powered_on(), "Robot power on failed."
+            robot.logger.info("Robot powered on.")
+
+        carry = RobotCommandBuilder.arm_carry_command()
+        carry_command_id = command_client.robot_command(carry)
+        robot.logger.info("Carry command issued.")
+        block_until_arm_arrives(command_client, carry_command_id, 3.0)
+        robot.logger.info("Arm in carry position.")
+
 
 #------Testing----------
 
@@ -222,7 +249,7 @@ def main(argv):
         docking_client = DockingClient(options, robot)
         with bosdyn.client.lease.LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True):
             #undock
-            docking_client.undock()
+            #docking_client.undock()
 
             if not robot.is_powered_on():
                 robot.logger.info("Powering on robot... This may take a several seconds.")
@@ -235,8 +262,9 @@ def main(argv):
             blocking_stand(command_client, timeout_sec=10)
             robot.logger.info("Robot standing.")
 
+            '''
             #to front of camera
-            robot.logger.infor("Attempting to orient gripper in front of frontright fisheye camera.")
+            robot.logger.info("Attempting to orient gripper in front of frontright fisheye camera.")
             image_responses = image_client.get_image([build_image_request("frontright_fisheye_image")])
             image = image_responses[0]
             print(bosdyn.client.frame_helpers.get_frame_names(image.shot.transforms_snapshot))
@@ -246,16 +274,55 @@ def main(argv):
 
             #stow arm
             arm_client.stow_arm()
+            '''
+
+            arm_client.carry_position()
+            open_command = RobotCommandBuilder.claw_gripper_open_command()
+            cmd_id = command_client.robot_command(open_command)
+            robot.logger.info("Opening claw...")
+
+            input("Press any key to continue...")
+
+            close_command = RobotCommandBuilder.claw_gripper_close_command()
+            cmd_id = command_client.robot_command(close_command)
+            robot.logger.info("Grasping.")
+
+            input("Press any key to continue...")
+
 
             #arm to front
             robot.logger.info("Moving arm to front")
-            sh0,sh1,el0,el1,wr0,wr1 = arm_client.joint_states["front"]
+            sh0,sh1,el0,el1,wr0,wr1 = arm_client.joint_states["frontleft"]
             arm_client.joint_move(sh0,sh1,el0,el1,wr0,wr1)
 
+            input("Press any key to continue...")
+            arm_client.carry_position()
+
+            robot.logger.info("Moving arm to front")
+            sh0,sh1,el0,el1,wr0,wr1 = arm_client.joint_states["frontright"]
+            arm_client.joint_move(sh0,sh1,el0,el1,wr0,wr1)
+
+            input("Press any key to continue...")
+
+            '''
             state = robot_state_client.get_robot_state()
             joint_states = state.kinematic_state.joint_states
             for joint_state in joint_states:
                 print(f"{joint_state.name}: {joint_state.position}")
+
+            
+            while True:
+                delta = input("Twist shoulder by (radians, enter 'q' to exit): ")
+                if delta == 'q':
+                    break
+                sh0 += float(delta)
+                while sh0 > 2 * 3.14:
+                    sh0 += -2 * 3.14
+                arm_client.joint_move(sh0,sh1,el0,el1,wr0,wr1)
+                state = robot_state_client.get_robot_state()
+                joint_states = state.kinematic_state.joint_states
+                for joint_state in joint_states:
+                    print(f"{joint_state.name}: {joint_state.position}")
 
             while True:
                 delta = input("Twist elbow by (radians, enter 'q' to exit): ")
@@ -269,6 +336,12 @@ def main(argv):
                 joint_states = state.kinematic_state.joint_states
                 for joint_state in joint_states:
                     print(f"{joint_state.name}: {joint_state.position}")
+            '''
+
+            arm_client.carry_position()
+            open_command = RobotCommandBuilder.claw_gripper_open_command()
+            cmd_id = command_client.robot_command(open_command)
+            robot.logger.info("Opening claw...")
 
             #stow arm again 
             arm_client.stow_arm()
