@@ -25,6 +25,32 @@ from google.protobuf import wrappers_pb2
 from spot_arm_client import ArmClient
 
 
+def format_spotImage_to_cv2(image: image_pb2.ImageResponse) -> cv2.Mat:
+    """
+    Format Spot Image to cv2.
+
+    Parameters
+    -----
+    image: ImageResponse
+        Image from Spot
+    
+    Returns
+    -----
+    ndarray
+        cv2 formatted image.
+    """
+    if image.shot.image.pixel_format == image_pb2.Image.PIXEL_FORMAT_DEPTH_U16:
+        dtype = np.uint16
+    else:
+        dtype = np.uint8
+    img = np.fromstring(image.shot.image.data, dtype=dtype)
+    if image.shot.image.format == image_pb2.Image.FORMAT_RAW:
+        img = img.reshape(image.shot.image.rows, image.shot.image.cols)
+    else:
+        img = cv2.imdecode(img, -1)
+    return img
+
+
 class DetectAndGraspClient:
     def __init__(self, config: argparse.Namespace, robot: bosdyn.client.Robot, net: str = None) -> None:
         """
@@ -104,7 +130,7 @@ class DetectAndGraspClient:
         assert len(image_responses), "Unable to get images."
         
         for image in image_responses:
-            img = self.format_spotImage_to_cv2(image)
+            img = format_spotImage_to_cv2(image)
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
             #send image through detection model
@@ -224,8 +250,14 @@ class DetectAndGraspClient:
         #check if images were received
         assert len(image_responses) == 1, "Unable to get valid images."
 
+        #turn off light
+        gripper_camera_brightness = wrappers_pb2.FloatValue(0.0)
+        gripper_camera_params = gripper_camera_param_pb2.GripperCameraParams(brightness=gripper_camera_brightness)
+        gripper_camera_param_request = gripper_camera_param_pb2.GripperCameraGetParamRequest(params=gripper_camera_params)
+        gripper_camera_param_response = gripper_camera_param_client.set_camera_params(gripper_camera_param_request)
+
         image = image_responses[0]
-        img = self.format_spotImage_to_cv2(image)
+        img = format_spotImage_to_cv2(image)
 
         #analysis algorithm
         img = cv2.GaussianBlur(img, (5,5), 1)
@@ -469,32 +501,6 @@ class DetectAndGraspClient:
         return result
 
 
-    def format_spotImage_to_cv2(image: image_pb2.ImageResponse) -> cv2.Mat:
-        """
-        Format Spot Image to cv2.
-
-        Parameters
-        -----
-        image: ImageResponse
-            Image from Spot
-        
-        Returns
-        -----
-        ndarray
-            cv2 formatted image.
-        """
-        if image.shot.image.pixel_format == image_pb2.Image.PIXEL_FORMAT_DEPTH_U16:
-            dtype = np.uint16
-        else:
-            dtype = np.uint8
-        img = np.fromstring(image.shot.image.data, dtype=dtype)
-        if image.shot.image.format == image_pb2.Image.FORMAT_RAW:
-            img = img.reshape(image.shot.image.rows, image.shot.image.cols)
-        else:
-            img = cv2.imdecode(img, -1)
-        return img
-
-
 #-----Testing-----
 
 
@@ -513,6 +519,9 @@ def main(argv):
     robot = sdk.create_robot(options)
     bosdyn.client.util.authenticate(robot)
     robot.time_sync.wait_for_sync()
+
+    assert not robot.is_estopped(), "Robot is estopped. Please use an external E-Stop client, " \
+                                    "such as the estop SDK example, to configure E-Stop."
 
     docking_client = DockingClient(options, robot)
     grasping_client = DetectAndGraspClient(options, robot, options.net)
