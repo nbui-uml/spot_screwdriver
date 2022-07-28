@@ -9,11 +9,12 @@ import bosdyn.client.lease
 import bosdyn.client.util
 import bosdyn.geometry
 from bosdyn.api import arm_command_pb2, geometry_pb2, synchronized_command_pb2, robot_command_pb2
-from bosdyn.client import math_helpers
-from bosdyn.client.frame_helpers import GRAV_ALIGNED_BODY_FRAME_NAME, ODOM_FRAME_NAME,  HAND_FRAME_NAME, get_a_tform_b
+from bosdyn.client import math_helpers, frame_helpers
+from bosdyn.client.frame_helpers import GRAV_ALIGNED_BODY_FRAME_NAME, ODOM_FRAME_NAME,  HAND_FRAME_NAME, BODY_FRAME_NAME, get_a_tform_b
 from bosdyn.client.robot_command import (RobotCommandBuilder, RobotCommandClient,
                                          block_until_arm_arrives, blocking_stand)
 from bosdyn.client.robot_state import RobotStateClient
+from bosdyn.client.image import ImageClient , build_image_request
 
 
 def make_robot_command(arm_joint_traj: arm_command_pb2.ArmJointTrajectory) -> synchronized_command_pb2.SynchronizedCommand:
@@ -101,7 +102,7 @@ class ArmClient:
         block_until_arm_arrives(command_client, cmd_id, timeout_sec=10)
         print("Arm finished moving.")
 
-    
+
     def arm_move(self, x, y, z, qw, qx, qy, qz,
                 rframe: str, tf: geometry_pb2.FrameTreeSnapshot = None) -> None:
         """
@@ -141,19 +142,20 @@ class ArmClient:
         robot.logger.info("Robot standing.")
 
         hand_ewrt_rframe = geometry_pb2.Vec3(x=x, y=y, z=z)
-        rframe_Q_hand = geometry_pb2.Quaternion(qw, qx, qy, qz)
+        rframe_Q_hand = geometry_pb2.Quaternion(w=qw, x=qx, y=qy, z=qz)
         rframe_T_hand = geometry_pb2.SE3Pose(position=hand_ewrt_rframe, rotation=rframe_Q_hand)
 
         if tf is None:
             robot_state = robot_state_client.get_robot_state()
             tf = robot_state.kinematic_state.transforms_snapshot
 
-        body_T_cam = get_a_tform_b(tf, GRAV_ALIGNED_BODY_FRAME_NAME, rframe)
+        body_T_cam = get_a_tform_b(tf, BODY_FRAME_NAME, rframe)
+        
         body_T_hand = body_T_cam * math_helpers.SE3Pose.from_obj(rframe_T_hand)
 
         arm_command = RobotCommandBuilder.arm_pose_command(
             body_T_hand.x, body_T_hand.y, body_T_hand.z,
-            body_T_hand.rot.x, body_T_hand.rot.y, body_T_hand.rot.z, body_T_hand.rot.w, GRAV_ALIGNED_BODY_FRAME_NAME
+            body_T_hand.rot.w, body_T_hand.rot.x, body_T_hand.rot.y, body_T_hand.rot.z, BODY_FRAME_NAME
         )
 
         cmd_id = command_client.robot_command(arm_command)
@@ -202,38 +204,77 @@ def main(argv):
     bosdyn.client.util.add_base_arguments(parser)
     options = parser.parse_args(argv)
 
+    bosdyn.client.util.setup_logging(options.verbose)
     sdk = bosdyn.client.create_standard_sdk("SpotArmClient")
     robot = sdk.create_robot(options.hostname)
+    bosdyn.client.util.authenticate(robot)
+    robot.time_sync.wait_for_sync()
+
+    
+    assert not robot.is_estopped(), "Robot is estopped. Please use an external E-Stop client, " \
+                                   "such as the estop SDK example, to configure E-Stop."
     try: #get lease here and do stuff
-        arm_client = ArmClient(options, robot)
-        docking_client = DockingClient(options, robot)
         lease_client = robot.ensure_client(bosdyn.client.lease.LeaseClient.default_service_name)
         robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
+        image_client = robot.ensure_client(ImageClient.default_service_name)
+
+        arm_client = ArmClient(options, robot)
+        docking_client = DockingClient(options, robot)
         with bosdyn.client.lease.LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True):
             #undock
             docking_client.undock()
 
-            #arm to front
-            sh0,sh1,el0,el1,wr0,wr1 = arm_client.joint_states["front"]
-            arm_client.arm_to_pose(sh0,sh1,el0,el1,wr0,wr1)
-            
-            #wait
+            if not robot.is_powered_on():
+                robot.logger.info("Powering on robot... This may take a several seconds.")
+                robot.power_on(timeout_sec=20)
+                assert robot.is_powered_on(), "Robot power on failed."
+                robot.logger.info("Robot powered on.")
+
+            robot.logger.info("Commanding robot to stand...")
+            command_client = robot.ensure_client(RobotCommandClient.default_service_name)
+            blocking_stand(command_client, timeout_sec=10)
+            robot.logger.info("Robot standing.")
+
+            #to front of camera
+            robot.logger.infor("Attempting to orient gripper in front of frontright fisheye camera.")
+            image_responses = image_client.get_image([build_image_request("frontright_fisheye_image")])
+            image = image_responses[0]
+            print(bosdyn.client.frame_helpers.get_frame_names(image.shot.transforms_snapshot))
+            arm_client.arm_move(0,0,0.5,0.707,0,0.707,0,"frontright_fisheye",image.shot.transforms_snapshot)
+
             input("Press any key to continue...")
 
             #stow arm
             arm_client.stow_arm()
 
-            #to front of camera
-            robot_state = robot_state_client.get_robot_state()
-            arm_client.arm_move(0,0,0.3,0,1,0,0,"frontright_fisheye", robot_state.kinematic_state.transforms_snapshot)
+            #arm to front
+            robot.logger.info("Moving arm to front")
+            sh0,sh1,el0,el1,wr0,wr1 = arm_client.joint_states["front"]
+            arm_client.joint_move(sh0,sh1,el0,el1,wr0,wr1)
 
-            input("Press any key to continue...")
+            state = robot_state_client.get_robot_state()
+            joint_states = state.kinematic_state.joint_states
+            for joint_state in joint_states:
+                print(f"{joint_state.name}: {joint_state.position}")
+
+            while True:
+                delta = input("Twist elbow by (radians, enter 'q' to exit): ")
+                if delta == 'q':
+                    break
+                el1 += float(delta)
+                while el1 > 2 * 3.14:
+                    el1 += -2 * 3.14
+                arm_client.joint_move(sh0,sh1,el0,el1,wr0,wr1)
+                state = robot_state_client.get_robot_state()
+                joint_states = state.kinematic_state.joint_states
+                for joint_state in joint_states:
+                    print(f"{joint_state.name}: {joint_state.position}")
 
             #stow arm again 
             arm_client.stow_arm()
 
             #dock
-            docking_client.dock(520)
+            #docking_client.dock(520)
         return True
     except Exception as exc:  # pylint: disable=broad-except
         logger = bosdyn.client.util.get_logger()
