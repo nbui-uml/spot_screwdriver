@@ -14,7 +14,7 @@ import bosdyn.client.lease
 import bosdyn.client.util
 from bosdyn.api import estop_pb2, geometry_pb2, image_pb2, manipulation_api_pb2, gripper_camera_param_pb2, gripper_command_pb2
 from bosdyn.client.estop import EstopClient
-from bosdyn.client.frame_helpers import VISION_FRAME_NAME, get_vision_tform_body, math_helpers, get_a_tform_b, GRAV_ALIGNED_BODY_FRAME_NAME, ODOM_FRAME_NAME
+from bosdyn.client.frame_helpers import math_helpers, get_a_tform_b, BODY_FRAME_NAME, ODOM_FRAME_NAME
 from bosdyn.client.image import ImageClient, build_image_request
 from bosdyn.client.manipulation_api_client import ManipulationApiClient
 from bosdyn.client.robot_command import RobotCommandClient, RobotCommandBuilder, blocking_stand, block_until_arm_arrives
@@ -22,33 +22,9 @@ from bosdyn.client.robot_state import RobotStateClient
 from bosdyn.client.gripper_camera_param import GripperCameraParamClient
 from google.protobuf import wrappers_pb2
 
+from util import format_spotImage_to_cv2
+
 from spot_arm_client import ArmClient
-
-
-def format_spotImage_to_cv2(image: image_pb2.ImageResponse) -> cv2.Mat:
-    """
-    Format Spot Image to cv2.
-
-    Parameters
-    -----
-    image: ImageResponse
-        Image from Spot
-    
-    Returns
-    -----
-    ndarray
-        cv2 formatted image.
-    """
-    if image.shot.image.pixel_format == image_pb2.Image.PIXEL_FORMAT_DEPTH_U16:
-        dtype = np.uint16
-    else:
-        dtype = np.uint8
-    img = np.fromstring(image.shot.image.data, dtype=dtype)
-    if image.shot.image.format == image_pb2.Image.FORMAT_RAW:
-        img = img.reshape(image.shot.image.rows, image.shot.image.cols)
-    else:
-        img = cv2.imdecode(img, -1)
-    return img
 
 
 class DetectAndGraspClient:
@@ -233,12 +209,17 @@ class DetectAndGraspClient:
 
         gripper_camera_param_client = robot.ensure_client(GripperCameraParamClient.default_service_name)
         image_client = robot.ensure_client(ImageClient.default_service_name)
+        command_client = robot.ensure_client(RobotCommandClient.default_service_name)
         
         #illuminate object and container
         gripper_camera_brightness = wrappers_pb2.FloatValue(0.75)
         gripper_camera_params = gripper_camera_param_pb2.GripperCameraParams(brightness=gripper_camera_brightness)
         gripper_camera_param_request = gripper_camera_param_pb2.GripperCameraGetParamRequest(params=gripper_camera_params)
         gripper_camera_param_response = gripper_camera_param_client.set_camera_params(gripper_camera_param_request)
+
+        open_command = RobotCommandBuilder.claw_gripper_open_command()
+        cmd_id = command_client.robot_command(open_command)
+        robot.logger.info("Opening gripper and turning on lights...")
 
         time.sleep(2)
 
@@ -255,6 +236,10 @@ class DetectAndGraspClient:
         gripper_camera_params = gripper_camera_param_pb2.GripperCameraParams(brightness=gripper_camera_brightness)
         gripper_camera_param_request = gripper_camera_param_pb2.GripperCameraGetParamRequest(params=gripper_camera_params)
         gripper_camera_param_response = gripper_camera_param_client.set_camera_params(gripper_camera_param_request)
+
+        close_command = RobotCommandBuilder.claw_gripper_close_command()
+        cmd_id = command_client.robot_command(close_command)
+        robot.logger.info("Closing gripper and turning off lights...")
 
         image = image_responses[0]
         img = format_spotImage_to_cv2(image)
@@ -327,7 +312,7 @@ class DetectAndGraspClient:
         y += 0.2
 
         cam_T_body = get_a_tform_b(image.shot.transforms_snapshot,
-                image.shot.frame_name_image_sensor, GRAV_ALIGNED_BODY_FRAME_NAME)
+                image.shot.frame_name_image_sensor, BODY_FRAME_NAME)
         hand_T_body = cam_T_body * math_helpers.SE3Pose(0,0,0, geometry_pb2.Quaternion(0.707, 0, 0, -0.707))
 
         arm_client.arm_move(
@@ -526,10 +511,10 @@ def main(argv):
     docking_client = DockingClient(options, robot)
     grasping_client = DetectAndGraspClient(options, robot, options.net)
     arm_client = ArmClient(options, robot)
-    lease_client = grasping_client.robot.ensure_client(bosdyn.client.lease.LeaseClient.default_service_name)
+    lease_client = robot.ensure_client(bosdyn.client.lease.LeaseClient.default_service_name)
     try:
         with bosdyn.client.lease.LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True):
-            docking_client.undock()
+            docking_client.start()
 
             input("Press any key to continue")
 
