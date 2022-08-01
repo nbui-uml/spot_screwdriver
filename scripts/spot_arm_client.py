@@ -226,6 +226,7 @@ def main(argv):
     """Command line interface."""
     from spot_docking_client import DockingClient
     from bosdyn.client.robot_state import RobotStateClient
+    from spot_screwdriver_orientation_client import ScrewdriverOrientationClient
 
     parser = argparse.ArgumentParser()
     bosdyn.client.util.add_base_arguments(parser)
@@ -247,34 +248,11 @@ def main(argv):
 
         arm_client = ArmClient(options, robot)
         docking_client = DockingClient(options, robot)
+        screwdriver_orientation_client = ScrewdriverOrientationClient(options, robot)
         with bosdyn.client.lease.LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True):
-            #undock
-            #docking_client.undock()
-
-            if not robot.is_powered_on():
-                robot.logger.info("Powering on robot... This may take a several seconds.")
-                robot.power_on(timeout_sec=20)
-                assert robot.is_powered_on(), "Robot power on failed."
-                robot.logger.info("Robot powered on.")
-
-            robot.logger.info("Commanding robot to stand...")
             command_client = robot.ensure_client(RobotCommandClient.default_service_name)
-            blocking_stand(command_client, timeout_sec=10)
-            robot.logger.info("Robot standing.")
 
-            '''
-            #to front of camera
-            robot.logger.info("Attempting to orient gripper in front of frontright fisheye camera.")
-            image_responses = image_client.get_image([build_image_request("frontright_fisheye_image")])
-            image = image_responses[0]
-            print(bosdyn.client.frame_helpers.get_frame_names(image.shot.transforms_snapshot))
-            arm_client.arm_move(0,0,0.5,0.707,0,0.707,0,"frontright_fisheye",image.shot.transforms_snapshot)
-
-            input("Press any key to continue...")
-
-            #stow arm
-            arm_client.stow_arm()
-            '''
+            docking_client.start()
 
             arm_client.carry_position()
             open_command = RobotCommandBuilder.claw_gripper_open_command()
@@ -289,11 +267,13 @@ def main(argv):
 
             input("Press any key to continue...")
 
-
             #arm to front
             robot.logger.info("Moving arm to front")
             sh0,sh1,el0,el1,wr0,wr1 = arm_client.joint_states["frontleft"]
             arm_client.joint_move(sh0,sh1,el0,el1,wr0,wr1)
+
+            angle = screwdriver_orientation_client.get_orientation_from_camera("frontleft_fisheye_image")
+            print("Angle: %.2f" %angle)
 
             input("Press any key to continue...")
             arm_client.carry_position()
@@ -301,6 +281,9 @@ def main(argv):
             robot.logger.info("Moving arm to front")
             sh0,sh1,el0,el1,wr0,wr1 = arm_client.joint_states["frontright"]
             arm_client.joint_move(sh0,sh1,el0,el1,wr0,wr1)
+
+            angle = screwdriver_orientation_client.get_orientation_from_camera("frontright_fisheye_image")
+            print("Angle: %.2f" %angle)
 
             input("Press any key to continue...")
 
