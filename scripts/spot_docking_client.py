@@ -2,7 +2,7 @@ import argparse
 
 import bosdyn.client
 from bosdyn.client import robot_command
-from bosdyn.client.docking import blocking_dock_robot, blocking_undock
+from bosdyn.client import docking
 
 
 class DockingClient:
@@ -33,27 +33,51 @@ class DockingClient:
         assert not robot.is_estopped(), "Robot has been estopped."
         command_client = robot.ensure_client(robot_command.RobotCommandClient.default_service_name)
         
-
         robot.power_on()
         robot_command.blocking_stand(command_client)
 
         print("Docking...")
-        blocking_dock_robot(robot, dock_id)
+        docking.blocking_dock_robot(robot, dock_id)
         print("Docking success.")
+        
 
-
-    def undock(self) -> None:
+    def undock(self) -> bool:
         """
-        Undocks the robot.
+        Undocks the robot if docked and returns True. Otherwise, does nothing and returns False.
         """
 
         robot = self.robot
         assert not robot.is_estopped(), "Robot has been estopped."
-        command_client = robot.ensure_client(robot_command.RobotCommandClient.default_service_name)
+        docking_client = robot.ensure_client(docking.DockingClient.default_service_name)
 
-        robot.power_on()
+        docking_state = docking_client.get_docking_state()
 
-        print("Undocking...")
-        blocking_undock(robot)
-        print("Undocked. Awaiting commands.")
+        if(docking_state.status == 1):
+            robot.power_on()
+
+            print("Undocking...")
+            docking.blocking_undock(robot)
+            print("Undocked. Awaiting commands.")
+            return True
+        return False
+
+
+    def start(self):
+        """
+        Starts the robot by turning on the motors and undocks/stands the robot.
+        """
+        robot = self.robot
+        assert not robot.is_estopped(), "Robot has been estopped."
+
+        if(self.undock() == False):
+            if not robot.is_powered_on():
+                robot.logger.info("Powering on robot... This may take a several seconds.")
+                robot.power_on(timeout_sec=20)
+                assert robot.is_powered_on(), "Robot power on failed."
+                robot.logger.info("Robot powered on.")
+
+            robot.logger.info("Commanding robot to stand...")
+            command_client = robot.ensure_client(robot_command.RobotCommandClient.default_service_name)
+            robot_command.blocking_stand(command_client, timeout_sec=10)
+            robot.logger.info("Robot standing.")
         

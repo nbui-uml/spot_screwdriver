@@ -8,13 +8,13 @@ class OrientationClassifier:
 
     def angle_from_line(self, x1, y1, x2, y2) -> float:
         z = np.complex(x2 - x1, y2 - y1)
-        return np.angle(z, deg=True)
+        return np.angle(z)
 
 
     def get_orientation(self, img: cv2.Mat) -> float:
         '''
         Gets the orientation from a focused head-on image of the screwdriver head.
-        If unable to find orientation, returns a dummy value (400.0).
+        If unable to find orientation, returns a dummy value (4.0).
         
         Parameters
         -----
@@ -36,7 +36,7 @@ class OrientationClassifier:
                 x1, y1, x2, y2 = line[0]
                 angles.append(self.angle_from_line(x1, y1, x2, y2))
         else:
-            return 400.0
+            return 4.0
         return np.average(np.array(angles))
 
     

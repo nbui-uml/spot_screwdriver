@@ -1,11 +1,11 @@
 import argparse
+import math
 import sys
 import os
 import time
 from typing import Any
 
 import cv2
-from matplotlib.pyplot import close
 import numpy as np
 
 import bosdyn.client
@@ -14,13 +14,15 @@ import bosdyn.client.lease
 import bosdyn.client.util
 from bosdyn.api import estop_pb2, geometry_pb2, image_pb2, manipulation_api_pb2, gripper_camera_param_pb2, gripper_command_pb2
 from bosdyn.client.estop import EstopClient
-from bosdyn.client.frame_helpers import VISION_FRAME_NAME, get_vision_tform_body, math_helpers, get_a_tform_b, GRAV_ALIGNED_BODY_FRAME_NAME, ODOM_FRAME_NAME
+from bosdyn.client.frame_helpers import math_helpers, get_a_tform_b, BODY_FRAME_NAME, ODOM_FRAME_NAME, HAND_FRAME_NAME
 from bosdyn.client.image import ImageClient, build_image_request
 from bosdyn.client.manipulation_api_client import ManipulationApiClient
 from bosdyn.client.robot_command import RobotCommandClient, RobotCommandBuilder, blocking_stand, block_until_arm_arrives
 from bosdyn.client.robot_state import RobotStateClient
 from bosdyn.client.gripper_camera_param import GripperCameraParamClient
 from google.protobuf import wrappers_pb2
+
+from util import format_spotImage_to_cv2
 
 from spot_arm_client import ArmClient
 
@@ -48,6 +50,11 @@ class DetectAndGraspClient:
             "frontright_fisheye_image"
         ]
 
+        self.ROTATION_ANGLE = {
+            'frontleft_fisheye': -78,
+            'frontright_fisheye': -102,
+        }
+
         #type SE3Pose
         self.poses_in_odom = {
             "container": None
@@ -61,9 +68,9 @@ class DetectAndGraspClient:
         self.INPUT_HEIGHT = 640
         self.SCORE_THRESHOLD = 0.25
         self.NMS_THRESHOLD = 0.45
-        self.CONFIDENCE_THRESHOLD = 0.5
+        self.CONFIDENCE_THRESHOLD = 0.4
         self.net = cv2.dnn.readNet(net)
-
+        
 
     def detect_and_grasp(self) -> bool:
         """
@@ -104,17 +111,22 @@ class DetectAndGraspClient:
         assert len(image_responses), "Unable to get images."
         
         for image in image_responses:
-            img = self.format_spotImage_to_cv2(image)
+            img = format_spotImage_to_cv2(image)
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
+            cols, rows = img.shape
+            M = cv2.getRotationMatrix2D((cols/2, rows/2), self.ROTATION_ANGLE[image.shot.frame_name_image_sensor], 1)
+            rotated_img = cv2.warpAffine(img, M, (cols, rows))
+
+
             #send image through detection model
-            formatted_img = self.format_yolov5(img)
+            formatted_img = self.format_yolov5(rotated_img)
             out = self.detect(formatted_img, self.net)
             class_ids, confidences, boxes = self.wrap_detection(formatted_img, out[0])
 
             #check for detections
-            if len(boxes) == 1:
-                box = boxes[0]
+            points = []
+            for box in boxes:
                 if box[2] > 300 or box[3] > 300:
                     print(f"No objects found in {image.shot.frame_name_image_sensor}")
                     continue
@@ -135,16 +147,34 @@ class DetectAndGraspClient:
                 #debugging
                 if os.path.exists("out/detect.jpg"):
                     os.remove("out/detect.jpg")
-                boxed_img = img.copy()
+                boxed_img = rotated_img.copy()
                 cv2.rectangle(boxed_img, box, (0,0,255), 2)
                 cv2.imwrite("out/detect.jpg", boxed_img)
-                
-                clip = img[box[1] : box[1] + box[3], box[0] : box[0] + box[2]]
 
-                self.grasp_from_image(image, cx, cy, clip)
-                return True
+                points.append((cx, cy))
+
+            valid_points = []
+            body_T_cam = get_a_tform_b(image.shot.transforms_snapshot, BODY_FRAME_NAME, image.shot.frame_name_image_sensor)
+            for point in points:
+                x, y, z = bosdyn.client.image.pixel_to_camera_space(image, point[0], point[1])
+                cam_T_point_position = geometry_pb2.Vec3(x=x, y=y, z=z)
+                cam_T_point = geometry_pb2.SE3Pose(position=cam_T_point_position, rotation=geometry_pb2.Quaternion(qw=0,qx=0,qy=0,qz=0))
+                body_T_point = body_T_cam * math_helpers.SE3Pose.from_obj(cam_T_point)
+
+                if body_T_point.x < 3.0:
+                    if math.fabs(body_T_point.y) < 1.0:
+                        if math.fabs(body_T_point.z) < 1.0:
+                            valid_points.append(point)
+
+            if len(valid_points) == 0:
+                print(f"No valid objects found in {image.shot.frame_name_image_sensor}")
             else:
-                print(f"No objects found in {image.shot.frame_name_image_sensor}")
+                points_to_transform = np.array([[valid_points[0][0], valid_points[0][1]]])
+                transformed_points = cv2.transform(points_to_transform, M.inverse())
+                cx = transformed_points[0][0]
+                cy = transformed_points[0][1]
+                self.grasp_from_image(image, cx, cy)
+                return True
 
         return False
 
@@ -164,7 +194,49 @@ class DetectAndGraspClient:
         """
         robot = self.robot
         command_client = robot.ensure_client(RobotCommandClient.default_service_name)
+        manipulation_api_client = robot.ensure_client(ManipulationApiClient.default_service_name)
+        robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
 
+        pick_vec = geometry_pb2.Vec2(x=pixel_x, y=pixel_y)
+        grasp = manipulation_api_pb2.PickObjectInImage(
+            pixel_xy=pick_vec, transforms_snapshot_for_camera=image.shot.transforms_snapshot,
+            frame_name_image_sensor=image.shot.frame_name_image_sensor,
+            camera_model=image.source.pinhole)
+        
+        # Ask the robot to pick up the object
+        grasp_request = manipulation_api_pb2.ManipulationApiRequest(pick_object_in_image=grasp)
+
+        # Send the request
+        cmd_response = manipulation_api_client.manipulation_api_command(
+            manipulation_api_request=grasp_request)
+
+        # Get feedback from the robot
+        while True:
+            feedback_request = manipulation_api_pb2.ManipulationApiFeedbackRequest(
+                manipulation_cmd_id=cmd_response.manipulation_cmd_id)
+
+            # Send the request
+            response = manipulation_api_client.manipulation_api_feedback_command(
+                manipulation_api_feedback_request=feedback_request)
+
+            print('Current state: ',
+                  manipulation_api_pb2.ManipulationFeedbackState.Name(response.current_state))
+
+            if response.current_state == manipulation_api_pb2.MANIP_STATE_GRASP_SUCCEEDED or response.current_state == manipulation_api_pb2.MANIP_STATE_GRASP_FAILED:
+                break
+
+            time.sleep(0.25)
+
+        robot.logger.info('Finished grasp.')
+
+        robot_state = robot_state_client.get_robot_state()
+        body_T_hand = get_a_tform_b(robot_state.kinematic_state.transforms_snapshot, HAND_FRAME_NAME, BODY_FRAME_NAME)
+        self.save_pose_to_odom(
+            body_T_hand.x, body_T_hand.y, body_T_hand.z, 
+            body_T_hand.rot.w, body_T_hand.x, body_T_hand.y, body_T_hand.z,
+            "container", BODY_FRAME_NAME, robot_state.kinematic_state.transforms_snapshot
+        )
+        '''
         x, y, z = bosdyn.client.image.pixel_to_camera_space(image, pixel_x, pixel_y)
         print(f"Object at {(x, y, z)} to camera frame")
         
@@ -174,21 +246,22 @@ class DetectAndGraspClient:
         x, y, z, image = self.position_on_gripper_camera()
         
         arm_client = ArmClient(self.config, robot)
-        arm_client.arm_move(x, y, z - 0.2, 1, 0, 0, 0, image.shot.frame_name_image_sensor, image.shot.transforms_snapeshot)
+        arm_client.arm_move(x, y, z - 0.2, 1, 0, 0, 0, image.shot.frame_name_image_sensor, image.shot.transforms_snapshot)
 
         open_command = RobotCommandBuilder.claw_gripper_open_command()
         cmd_id = command_client.robot_command(open_command)
         robot.logger.info("Opening claw...")
         time.sleep(1)
 
-        arm_client.arm_move(x, y, z, 1, 0, 0, 0, image.shot.frame_name_image_sensor, image.shot.transforms_snapeshot)
-        self.save_pose_to_odom(x, y, z, 1, 0, 0, 0, "container", image.shot.frame_name_image_sensor, image.shot.transforms_snapeshot)
+        arm_client.arm_move(x, y, z, 1, 0, 0, 0, image.shot.frame_name_image_sensor, image.shot.transforms_snapshot)
+        self.save_pose_to_odom(x, y, z, 1, 0, 0, 0, "container", image.shot.frame_name_image_sensor, image.shot.transforms_snapshot)
 
         close_command = RobotCommandBuilder.claw_gripper_close_command()
         cmd_id = command_client.robot_command(close_command)
         robot.logger.info("Grasping.")
 
-        arm_client.arm_move(x, y, z - 0.4, 1, 0, 0, 0, image.shot.frame_name_image_sensor, image.shot.transforms_snapeshot)
+        arm_client.arm_move(x, y, z - 0.4, 1, 0, 0, 0, image.shot.frame_name_image_sensor, image.shot.transforms_snapshot)
+        '''
         
 
     def position_on_gripper_camera(self) -> Any:
@@ -207,12 +280,17 @@ class DetectAndGraspClient:
 
         gripper_camera_param_client = robot.ensure_client(GripperCameraParamClient.default_service_name)
         image_client = robot.ensure_client(ImageClient.default_service_name)
+        command_client = robot.ensure_client(RobotCommandClient.default_service_name)
         
         #illuminate object and container
-        gripper_camera_brightness = wrappers_pb2.FloatValue(0.75)
+        gripper_camera_brightness = wrappers_pb2.Floatvalue(value=0.75)
         gripper_camera_params = gripper_camera_param_pb2.GripperCameraParams(brightness=gripper_camera_brightness)
         gripper_camera_param_request = gripper_camera_param_pb2.GripperCameraGetParamRequest(params=gripper_camera_params)
         gripper_camera_param_response = gripper_camera_param_client.set_camera_params(gripper_camera_param_request)
+
+        open_command = RobotCommandBuilder.claw_gripper_open_command()
+        cmd_id = command_client.robot_command(open_command)
+        robot.logger.info("Opening gripper and turning on lights...")
 
         time.sleep(2)
 
@@ -224,8 +302,18 @@ class DetectAndGraspClient:
         #check if images were received
         assert len(image_responses) == 1, "Unable to get valid images."
 
+        #turn off light
+        gripper_camera_brightness = wrappers_pb2.Floatvalue(value=0.0)
+        gripper_camera_params = gripper_camera_param_pb2.GripperCameraParams(brightness=gripper_camera_brightness)
+        gripper_camera_param_request = gripper_camera_param_pb2.GripperCameraGetParamRequest(params=gripper_camera_params)
+        gripper_camera_param_response = gripper_camera_param_client.set_camera_params(gripper_camera_param_request)
+
+        close_command = RobotCommandBuilder.claw_gripper_close_command()
+        cmd_id = command_client.robot_command(close_command)
+        robot.logger.info("Closing gripper and turning off lights...")
+
         image = image_responses[0]
-        img = self.format_spotImage_to_cv2(image)
+        img = format_spotImage_to_cv2(image)
 
         #analysis algorithm
         img = cv2.GaussianBlur(img, (5,5), 1)
@@ -295,7 +383,7 @@ class DetectAndGraspClient:
         y += 0.2
 
         cam_T_body = get_a_tform_b(image.shot.transforms_snapshot,
-                image.shot.frame_name_image_sensor, GRAV_ALIGNED_BODY_FRAME_NAME)
+                image.shot.frame_name_image_sensor, BODY_FRAME_NAME)
         hand_T_body = cam_T_body * math_helpers.SE3Pose(0,0,0, geometry_pb2.Quaternion(0.707, 0, 0, -0.707))
 
         arm_client.arm_move(
@@ -348,7 +436,7 @@ class DetectAndGraspClient:
         robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
 
         hand_ewrt_rframe = geometry_pb2.Vec3(x=x, y=y, z=z)
-        rframe_Q_hand = geometry_pb2.Quaternion(qw, qx, qy, qz)
+        rframe_Q_hand = geometry_pb2.Quaternion(w=qw, x=qx, y=qy, z=qz)
         rframe_T_hand = geometry_pb2.SE3Pose(position=hand_ewrt_rframe, rotation=rframe_Q_hand)
 
         if tf is None:
@@ -469,32 +557,6 @@ class DetectAndGraspClient:
         return result
 
 
-    def format_spotImage_to_cv2(image: image_pb2.ImageResponse) -> cv2.Mat:
-        """
-        Format Spot Image to cv2.
-
-        Parameters
-        -----
-        image: ImageResponse
-            Image from Spot
-        
-        Returns
-        -----
-        ndarray
-            cv2 formatted image.
-        """
-        if image.shot.image.pixel_format == image_pb2.Image.PIXEL_FORMAT_DEPTH_U16:
-            dtype = np.uint16
-        else:
-            dtype = np.uint8
-        img = np.fromstring(image.shot.image.data, dtype=dtype)
-        if image.shot.image.format == image_pb2.Image.FORMAT_RAW:
-            img = img.reshape(image.shot.image.rows, image.shot.image.cols)
-        else:
-            img = cv2.imdecode(img, -1)
-        return img
-
-
 #-----Testing-----
 
 
@@ -510,17 +572,20 @@ def main(argv):
     options = parser.parse_args(argv)
     
     sdk = bosdyn.client.create_standard_sdk("GraspingClient")
-    robot = sdk.create_robot(options)
+    robot = sdk.create_robot(options.hostname)
     bosdyn.client.util.authenticate(robot)
     robot.time_sync.wait_for_sync()
+
+    assert not robot.is_estopped(), "Robot is estopped. Please use an external E-Stop client, " \
+                                    "such as the estop SDK example, to configure E-Stop."
 
     docking_client = DockingClient(options, robot)
     grasping_client = DetectAndGraspClient(options, robot, options.net)
     arm_client = ArmClient(options, robot)
-    lease_client = grasping_client.robot.ensure_client(bosdyn.client.lease.LeaseClient.default_service_name)
+    lease_client = robot.ensure_client(bosdyn.client.lease.LeaseClient.default_service_name)
     try:
         with bosdyn.client.lease.LeaseKeepAlive(lease_client, must_acquire=True, return_at_exit=True):
-            docking_client.undock()
+            docking_client.start()
 
             input("Press any key to continue")
 
@@ -534,6 +599,8 @@ def main(argv):
                     break
 
             input("Press any key to continue")
+
+            arm_client.carry_position()
 
             grasping_client.return_object_to_container()
 
