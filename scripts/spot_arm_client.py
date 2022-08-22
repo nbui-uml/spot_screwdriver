@@ -221,6 +221,43 @@ class ArmClient:
 
 #------Testing----------
 
+def screwdriver_calibration(robot, robot_state_client, arm_client, screwdriver_orientation_client, view_name):
+    robot.logger.info("Moving arm to front")
+    sh0,sh1,el0,el1,wr0,wr1 = arm_client.joint_states[view_name]
+    arm_client.joint_move(sh0,sh1,el0,el1,wr0,wr1)
+
+    time.sleep(0.5)
+
+    sh0,sh1,el0,el1,wr0,wr1 = arm_client.joint_states[f"{view_name}_view"]
+    arm_client.joint_move(sh0,sh1,el0,el1,wr0,wr1)
+
+    angle = screwdriver_orientation_client.get_orientation_from_camera(f"{view_name}_fisheye_image")
+    print("Angle: %.3f" %angle)
+
+    while True:
+        direction = input("Calibrate hand position (WASD). Press 'q' to quit. Enter input: ").lower()
+        if direction == 'q':
+            break
+        elif direction == 'a':
+            el1 += 0.1
+        elif direction == 'd':
+            el1 += -0.1
+        elif direction == 'w':
+            wr0 += 0.1
+        elif direction == 's':
+            wr0 += -0.1
+        angle = screwdriver_orientation_client.get_orientation_from_camera(f"{view_name}_fisheye_image")
+        print("Angle: %.3f" %angle)
+
+    if angle != 4.0:
+        screwdriver_orientation_client.save_hand_T_screwdriver(angle)
+        robot_state = robot_state_client.get_robot_state()
+        joint_states = robot_state.kinematic_state.joint_states
+        print(joint_states)
+
+    input("Press any key to continue...")
+
+
 def main(argv):
     """Command line interface."""
     from spot_docking_client import DockingClient
@@ -277,39 +314,9 @@ def main(argv):
 
             input("Press any key to continue...")
 
-            #arm to front
-            robot.logger.info("Moving arm to front")
-            sh0,sh1,el0,el1,wr0,wr1 = arm_client.joint_states["frontleft"]
-            arm_client.joint_move(sh0,sh1,el0,el1,wr0,wr1)
-
-            time.sleep(0.5)
-            sh0,sh1,el0,el1,wr0,wr1 = arm_client.joint_states["frontleft_view"]
-            arm_client.joint_move(sh0,sh1,el0,el1,wr0,wr1)
-
-            angle = screwdriver_orientation_client.get_orientation_from_camera("frontleft_fisheye_image")
-            print("Angle: %.3f" %angle)
-
-            if angle != 4.0:
-                screwdriver_orientation_client.save_hand_T_screwdriver(angle)
-
-            input("Press any key to continue...")
+            screwdriver_calibration(robot, robot_state_client, arm_client, screwdriver_orientation_client, "frontleft")
             arm_client.carry_position()
-
-            robot.logger.info("Moving arm to front")
-            sh0,sh1,el0,el1,wr0,wr1 = arm_client.joint_states["frontright"]
-            arm_client.joint_move(sh0,sh1,el0,el1,wr0,wr1)
-
-            time.sleep(0.5)
-            sh0,sh1,el0,el1,wr0,wr1 = arm_client.joint_states["frontright_view"]
-            arm_client.joint_move(sh0,sh1,el0,el1,wr0,wr1)
-
-            angle = screwdriver_orientation_client.get_orientation_from_camera("frontright_fisheye_image")
-            print("Angle: %.3f" %angle)
-
-            if angle != 4.0:
-                screwdriver_orientation_client.save_hand_T_screwdriver(angle)
-
-            input("Press any key to continue...")
+            screwdriver_calibration(robot, robot_state_client, arm_client, screwdriver_orientation_client, "frontright")
 
             arm_client.carry_position()
             open_command = RobotCommandBuilder.claw_gripper_open_command()
