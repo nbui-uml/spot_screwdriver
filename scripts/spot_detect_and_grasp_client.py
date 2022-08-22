@@ -7,6 +7,7 @@ from typing import Any
 
 import cv2
 import numpy as np
+from scipy import ndimage
 
 import bosdyn.client
 import bosdyn.client.estop
@@ -14,7 +15,7 @@ import bosdyn.client.lease
 import bosdyn.client.util
 from bosdyn.api import estop_pb2, geometry_pb2, image_pb2, manipulation_api_pb2, gripper_camera_param_pb2, gripper_command_pb2
 from bosdyn.client.estop import EstopClient
-from bosdyn.client.frame_helpers import math_helpers, get_a_tform_b, BODY_FRAME_NAME, ODOM_FRAME_NAME, HAND_FRAME_NAME
+from bosdyn.client.frame_helpers import math_helpers, get_a_tform_b, BODY_FRAME_NAME, ODOM_FRAME_NAME, HAND_FRAME_NAME, VISION_FRAME_NAME
 from bosdyn.client.image import ImageClient, build_image_request
 from bosdyn.client.manipulation_api_client import ManipulationApiClient
 from bosdyn.client.robot_command import RobotCommandClient, RobotCommandBuilder, blocking_stand, block_until_arm_arrives
@@ -22,7 +23,7 @@ from bosdyn.client.robot_state import RobotStateClient
 from bosdyn.client.gripper_camera_param import GripperCameraParamClient
 from google.protobuf import wrappers_pb2
 
-from util import format_spotImage_to_cv2
+from util import format_spotImage_to_cv2, reverse_rotation_map, pixel_to_camera_frame
 
 from spot_arm_client import ArmClient
 
@@ -67,8 +68,8 @@ class DetectAndGraspClient:
         self.INPUT_WIDTH = 640
         self.INPUT_HEIGHT = 640
         self.SCORE_THRESHOLD = 0.25
-        self.NMS_THRESHOLD = 0.45
-        self.CONFIDENCE_THRESHOLD = 0.4
+        self.NMS_THRESHOLD = 0.35
+        self.CONFIDENCE_THRESHOLD = 0.3
         self.net = cv2.dnn.readNet(net)
         
 
@@ -103,21 +104,23 @@ class DetectAndGraspClient:
         blocking_stand(command_client, timeout_sec=10)
         robot.logger.info("Robot standing.")
 
-        robot.logger.info("Getting images")
-        image_quality = 75
-        image_responses = image_client.get_image([build_image_request(source, image_quality) for source in self.image_sources])
-
-        #check if images were received
-        assert len(image_responses), "Unable to get images."
+        cameras = ["frontleft", "frontright"]
         
-        for image in image_responses:
-            img = format_spotImage_to_cv2(image)
+        for camera in cameras:
+            sources = [camera + '_depth_in_visual_frame', camera + '_fisheye_image']
+            image_responses = image_client.get_image_from_sources(sources)
+            if len(image_responses) < 2:
+                print(f"Failed to get images from {camera}.")
+                continue
+            depth_image = image_responses[0]
+            depth = np.frombuffer(depth_image.shot.image.data, dtype=np.uint16)
+            depth = depth.reshape(depth_image.shot.image.rows, depth_image.shot.image.cols)
+            visual_image = image_responses[1]
+            img = format_spotImage_to_cv2(visual_image)
             img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
-            cols, rows = img.shape
-            M = cv2.getRotationMatrix2D((cols/2, rows/2), self.ROTATION_ANGLE[image.shot.frame_name_image_sensor], 1)
-            rotated_img = cv2.warpAffine(img, M, (cols, rows))
-
+            cols, rows, _ = img.shape
+            rotated_img = ndimage.rotate(img, self.ROTATION_ANGLE[visual_image.shot.frame_name_image_sensor])
 
             #send image through detection model
             formatted_img = self.format_yolov5(rotated_img)
@@ -128,13 +131,14 @@ class DetectAndGraspClient:
             points = []
             for box in boxes:
                 if box[2] > 300 or box[3] > 300:
-                    print(f"No objects found in {image.shot.frame_name_image_sensor}")
+                    print(f"No objects found in {visual_image.shot.frame_name_image_sensor}")
                     continue
 
                 cx = int(box[0] + (box[2] * 0.5))
                 cy = int(box[1] + (box[3] * 0.5))
-                print(f"Object found at {(cx, cy)}, {box} in {image.shot.frame_name_image_sensor}")
+                print(f"Object found at {(cx, cy)}, {box} in {visual_image.shot.frame_name_image_sensor}")
 
+                '''
                 if box[0] < 0:
                     box[0] = 0
                 if box[1] < 0:
@@ -143,6 +147,7 @@ class DetectAndGraspClient:
                     box[2] = img.shape[1] - box[0]
                 if box[1] + box[3] > img.shape[0]:
                     box[3] = img.shape[0] - box[1]
+                '''
                 
                 #debugging
                 if os.path.exists("out/detect.jpg"):
@@ -151,31 +156,25 @@ class DetectAndGraspClient:
                 cv2.rectangle(boxed_img, box, (0,0,255), 2)
                 cv2.imwrite("out/detect.jpg", boxed_img)
 
-                points.append((cx, cy))
+                rotated_img[cy][cx] = [0,0,255]
+                points.append([cx, cy])
 
-            valid_points = []
-            body_T_cam = get_a_tform_b(image.shot.transforms_snapshot, BODY_FRAME_NAME, image.shot.frame_name_image_sensor)
-            for point in points:
-                x, y, z = bosdyn.client.image.pixel_to_camera_space(image, point[0], point[1])
-                cam_T_point_position = geometry_pb2.Vec3(x=x, y=y, z=z)
-                cam_T_point = geometry_pb2.SE3Pose(position=cam_T_point_position, rotation=geometry_pb2.Quaternion(qw=0,qx=0,qy=0,qz=0))
-                body_T_point = body_T_cam * math_helpers.SE3Pose.from_obj(cam_T_point)
+            mapped_img = reverse_rotation_map(img, rotated_img, self.ROTATION_ANGLE[visual_image.shot.frame_name_image_sensor])
+            hsv_mapped = cv2.cvtColor(mapped_img, cv2.COLOR_BGR2HSV)
+            lower = np.array([0, 150, 150])
+            higher = np.array([255, 255, 255])
+            mask = cv2.inRange(hsv_mapped, lower, higher)
+            transformed_points = np.argwhere(mask)
 
-                if body_T_point.x < 3.0:
-                    if math.fabs(body_T_point.y) < 1.0:
-                        if math.fabs(body_T_point.z) < 1.0:
-                            valid_points.append(point)
+            valid_points = self.get_valid_points(visual_image, depth_image, transformed_points)
 
             if len(valid_points) == 0:
-                print(f"No valid objects found in {image.shot.frame_name_image_sensor}")
+                print(f"No valid objects found in {visual_image.shot.frame_name_image_sensor}")
             else:
-                points_to_transform = np.array([[valid_points[0][0], valid_points[0][1]]])
-                transformed_points = cv2.transform(points_to_transform, M.inverse())
-                cx = transformed_points[0][0]
-                cy = transformed_points[0][1]
-                self.grasp_from_image(image, cx, cy)
+                cx = valid_points[0][0]
+                cy = valid_points[0][1]
+                self.grasp_from_image(visual_image, cx, cy)
                 return True
-
         return False
 
 
@@ -202,6 +201,27 @@ class DetectAndGraspClient:
             pixel_xy=pick_vec, transforms_snapshot_for_camera=image.shot.transforms_snapshot,
             frame_name_image_sensor=image.shot.frame_name_image_sensor,
             camera_model=image.source.pinhole)
+
+        # Tell the grasping system that we want a top-down grasp.
+
+        # The axis on the gripper is the x-axis.
+        axis_on_gripper_ewrt_gripper = geometry_pb2.Vec3(x=1, y=0, z=0)
+
+        # The axis in the vision frame is the negative z-axis
+        axis_to_align_with_ewrt_vision = geometry_pb2.Vec3(x=0, y=0, z=-1)
+
+        # Add the vector constraint to our proto.
+        constraint = grasp.grasp_params.allowable_orientation.add()
+        constraint.vector_alignment_with_tolerance.axis_on_gripper_ewrt_gripper.CopyFrom(
+            axis_on_gripper_ewrt_gripper)
+        constraint.vector_alignment_with_tolerance.axis_to_align_with_ewrt_frame.CopyFrom(
+            axis_to_align_with_ewrt_vision)
+
+        # We'll take anything within about 15 degrees for top-down or horizontal grasps.
+        constraint.vector_alignment_with_tolerance.threshold_radians = 0.25
+
+        # Specify the frame we're using.
+        grasp.grasp_params.grasp_params_frame_name = VISION_FRAME_NAME
         
         # Ask the robot to pick up the object
         grasp_request = manipulation_api_pb2.ManipulationApiRequest(pick_object_in_image=grasp)
@@ -266,6 +286,7 @@ class DetectAndGraspClient:
 
     def position_on_gripper_camera(self) -> Any:
         """
+        DEPRECATED
         Calculates the position of the screwdriver in relation to the gripper camera.
         
         Returns
@@ -365,6 +386,7 @@ class DetectAndGraspClient:
 
     def arm_to_above_object(self, image: image_pb2.ImageResponse, pixel_x: int, pixel_y: int) -> None:
         """
+        DEPRECATED
         Move arm above a point in the image.
 
         Parameters
@@ -391,6 +413,46 @@ class DetectAndGraspClient:
             hand_T_body.rot.w, hand_T_body.rot.x, hand_T_body.rot.y, hand_T_body.rot.z, 
             image.shot.frame_name_image_sensor, image.shot.transforms_snapshot
         )
+    
+    
+    def get_valid_points(visual_image: image_pb2.ImageResponse, depth_image: image_pb2.ImageResponse, 
+                            points: np.ndarray, max_x: float=2.0, max_y: float=1.0, max_z: float=1.0) -> list:
+        """
+        Returns the points from the list of points that fall within the spatial limits to the body frame.
+
+        Parameters
+        -----
+        visual_image: ImageResponse
+            ImageResponse object for the visual image.
+        depth_image: ImageResponse
+            ImageResponse object for the depth image.
+        points: ndarray
+            Array of detected points.
+        max_x: float
+            Max x value of a valid point.
+        max_y: float
+            Max y value of a valid point.
+        max_z: float
+            Max z value of a valid point.
+        
+        Returns
+        -----
+        list
+            List of a valid points in the image.
+        """
+        body_T_cam = get_a_tform_b(visual_image.shot.transforms_snapshot, BODY_FRAME_NAME, visual_image.shot.frame_name_image_sensor)
+        valid_points =  []
+        for point in points:
+            x, y, z = pixel_to_camera_frame(visual_image, depth_image, point[0], point[1])
+            cam_T_point_position = geometry_pb2.Vec3(x=x, y=y, z=z)
+            cam_T_point = geometry_pb2.SE3Pose(position=cam_T_point_position, rotation=geometry_pb2.Quaternion(qw=0,qx=0,qy=0,qz=0))
+            body_T_point = body_T_cam * math_helpers.SE3Pose.from_obj(cam_T_point)
+
+            if body_T_point.x < max_x:
+                if math.fabs(body_T_point.y) < max_y:
+                    if math.fabs(body_T_point.z) < max_z:
+                        valid_points.append(point)
+        return valid_points
 
 
     def return_object_to_container(self) -> None:
