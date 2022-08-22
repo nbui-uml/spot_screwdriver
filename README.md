@@ -1,5 +1,5 @@
 # spot_screwdriver
-A package for Spot to use a screwdriver
+A package for Spot to use a screwdriver :dog:.
 
 ----
 spot_arm_client.py has the code that brings the arm to the front to analyze the screwdriver.
