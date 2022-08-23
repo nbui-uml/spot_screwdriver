@@ -318,7 +318,7 @@ def main(argv):
             image_responses = image_client.get_image([build_image_request("frontleft_fisheye_image", image_quality)])
             image = image_responses[0]
             position = geometry_pb2.Vec3(x=0.25, y=0.0, z=0.0)
-            q = bosdyn.geometry.EulerZXY(z=3.14, x=0, y=0).to_quaternion()
+            q = bosdyn.geometry.EulerZXY(3.14, 0, 0).to_quaternion()
             cam_T_position = geometry_pb2.SE3Pose(position=position, rotation=q)
             arm_command = RobotCommandBuilder.arm_pose_command(x=0.2, y=0.0, z=0.0, qw=q.w, qx=q.x, qy=q.y, qz=q.z, frame_name=image.shot.frame_name_image_sensor)
             cmd_id = command_client.robot_command(arm_command)
@@ -327,7 +327,16 @@ def main(argv):
             angle = screwdriver_orientation_client.get_orientation_from_camera()
             print(f"Angle: {angle}")
 
-            input("Press any key to continue...")
+            while True:
+                d = input("Enter distance to move or 'q' to quit: ").lower()
+                if d == 'q':
+                    break
+                position.x += float(d)
+                arm_command = RobotCommandBuilder.arm_pose_command(x=0.2, y=0.0, z=0.0, qw=q.w, qx=q.x, qy=q.y, qz=q.z, frame_name=image.shot.frame_name_image_sensor)
+                cmd_id = command_client.robot_command(arm_command)
+                block_until_arm_arrives(command_client, cmd_id, 10)
+                angle = screwdriver_orientation_client.get_orientation_from_camera()
+                print(f"Angle: {angle}")
 
             arm_client.carry_position()
             open_command = RobotCommandBuilder.claw_gripper_open_command()

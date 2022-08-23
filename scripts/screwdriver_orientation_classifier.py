@@ -27,7 +27,7 @@ class OrientationClassifier:
             The orientation of the screwdriver.
         '''
         img = cv2.resize(img, (100, 100))
-        if len(img.shape == 3):
+        if len(img.shape) == 3:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         else:
             gray = img

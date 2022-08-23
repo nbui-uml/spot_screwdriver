@@ -232,20 +232,22 @@ def screwdriver_calibration(robot, robot_state_client, arm_client, screwdriver_o
     arm_client.joint_move(sh0,sh1,el0,el1,wr0,wr1)
 
     angle = screwdriver_orientation_client.get_orientation_from_camera(f"{view_name}_fisheye_image")
-    print("Angle: %.3f" %angle)
+    print("Angle: %.3f" %angle) 
 
     while True:
         direction = input("Calibrate hand position (WASD). Press 'q' to quit. Enter input: ").lower()
         if direction == 'q':
             break
         elif direction == 'a':
-            el1 += 0.1
+            el1 += 0.05
         elif direction == 'd':
-            el1 += -0.1
+            el1 += -0.05
         elif direction == 'w':
-            wr0 += 0.1
+            wr0 += 0.05
         elif direction == 's':
-            wr0 += -0.1
+            wr0 += -0.05
+        #need to add another degree of freedom
+        arm_client.joint_move(sh0,sh1,el0,el1,wr0,wr1)
         angle = screwdriver_orientation_client.get_orientation_from_camera(f"{view_name}_fisheye_image")
         print("Angle: %.3f" %angle)
 

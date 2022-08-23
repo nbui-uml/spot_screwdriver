@@ -135,7 +135,7 @@ class ScrewdriverOrientationClient:
 
         robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
 
-        screwdriver_position = geometry_pb2.Vec3(0.08,0,0)
+        screwdriver_position = geometry_pb2.Vec3(x=0.08,y=0,z=0)
         q = math_helpers.Quat.from_roll(angle)
         self.hand_T_screwdriver = geometry_pb2.SE3Pose(position=screwdriver_position, rotation=q)
 
