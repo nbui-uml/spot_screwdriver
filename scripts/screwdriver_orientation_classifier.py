@@ -27,7 +27,10 @@ class OrientationClassifier:
             The orientation of the screwdriver.
         '''
         img = cv2.resize(img, (100, 100))
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        if len(img.shape == 3):
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = img
         canny = cv2.Canny(gray, 100, 100)
         lines = cv2.HoughLinesP(canny, 1, np.pi/180, 30, minLineLength=30, maxLineGap=10)
         angles = []
