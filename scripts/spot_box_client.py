@@ -10,6 +10,7 @@ import bosdyn.client
 import bosdyn.geometry
 from bosdyn.api import image_pb2, geometry_pb2, manipulation_api_pb2
 from bosdyn.client import math_helpers
+from bosdyn.client.frame_helpers import get_a_tform_b, ODOM_FRAME_NAME
 from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
 from bosdyn.client.image import ImageClient, build_image_request
 from bosdyn.client.manipulation_api_client import ManipulationApiClient
@@ -26,6 +27,14 @@ class Screw:
         self.cx = int(self.rect.x + 0.5 * self.rect.w)
         self.cy = int(self.rect.y + 0.5 * self.rect.h)
         self.angle = angle
+        self.odom_T_position = None
+
+    def set_position(self, visual_image, depth_image) -> None:
+        x, y, z = pixel_to_camera_frame(visual_image, depth_image, self.cx, self.cy)
+        camera_T_position = math_helpers.Vec3(x,y,z)
+        odom_T_camera = get_a_tform_b(visual_image.shot.transforms_snapshot, visual_image.shot.frame_name_image_sensor, ODOM_FRAME_NAME)
+        odom_T_position = odom_T_camera * camera_T_position
+        self.odom_T_position = odom_T_position
 
 class BoxClient:
     def __init__(self, config: argparse.Namespace, robot: bosdyn.client.Robot) -> None:
@@ -213,20 +222,24 @@ class BoxClient:
         robot.logger.info("Opening gripper...")
         time.sleep(1)
 
-        image_quality = 90
-        image_responses = image_client.get_image([build_image_request("hand_color_image", image_quality)])
+        sources = ["hand_depth_in_hand_color_frame", "hand_color_image"]
+        image_responses = image_client.get_image_from_sources(sources)
 
         #check if images were received
-        assert len(image_responses), "Unable to get images."
+        assert len(image_responses) == 2, "Unable to get images."
 
         close_command = RobotCommandBuilder.claw_gripper_close_command()
         cmd_id = command_client.robot_command(close_command)
         robot.logger.info("Closing gripper...")
 
-        image = image_responses[0]
+        depth = image_responses[0]
+        image = image_responses[1]
         img = format_spotImage_to_cv2(image)
 
-        return self.get_screws_from_img(img)
+        screws = self.get_screws_from_img(img)
+        for screw in screws:
+            screw.set_position(image, depth)
+        return screws
 
 
     def get_screws_from_img(self, img: cv2.Mat) -> list:
@@ -319,7 +332,7 @@ def main(argv):
             cam_T_approach.position.x += -0.5 * approach.x
             cam_T_approach.position.y += -0.5 * approach.y
             cam_T_approach.position.z += -0.5 * approach.z
-            detect_and_grasp_client.save_pose_to_odom(
+            odom_T_approach = detect_and_grasp_client.save_pose_to_odom(
                 cam_T_approach.x, cam_T_approach.y, cam_T_approach.z,
                 cam_T_approach.rot.w, cam_T_approach.rot.x, cam_T_approach.rot.y, cam_T_approach.rot.z,
                 "box_approach", image.shot.frame_name_image_sensor, image.shot.transforms_snapshot
@@ -327,7 +340,6 @@ def main(argv):
 
             input("Press any key to continue...")
 
-            odom_T_approach = detect_and_grasp_client.poses_in_odom["box_approach"]
             arm_client.arm_move(
                 odom_T_approach.x, odom_T_approach.y, odom_T_approach.z, 
                 odom_T_approach.rot.w, odom_T_approach.rot.x, odom_T_approach.rot.y, odom_T_approach.rot.z,
@@ -335,6 +347,10 @@ def main(argv):
             )
 
             capture_gripper_image(robot, "out/box_pose.jpg")
+            screws = box_client.get_screws()
+            for screw in screws:
+                print(screw)
+
             arm_client.stow_arm()
 
             docking_client.dock(520)
