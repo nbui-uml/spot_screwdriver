@@ -477,7 +477,7 @@ class DetectAndGraspClient:
         arm_client.arm_move(pose.x, pose.y, pose.z + 0.3, pose.rot.w, pose.rot.x, pose.rot.y, pose.rot.z, ODOM_FRAME_NAME)
 
 
-    def save_pose_to_odom(self, x, y, z, qw, qx, qy, qz, name: str, rframe: str, tf: geometry_pb2.FrameTreeSnapshot = None) -> None:
+    def save_pose_to_odom(self, x, y, z, qw, qx, qy, qz, name: str, rframe: str, tf: geometry_pb2.FrameTreeSnapshot = None) -> math_helpers.SE3Pose:
         """
         Saves the pose in reference to odom in self.poses_in_odom.
 
@@ -493,22 +493,28 @@ class DetectAndGraspClient:
                 Name of the reference frame.
             tf: FrameTreeSnapshot
                 FrameTreeSnapshot when pose was recorded.
+
+        Returns
+        -----
+        math_helpers.SE3Pose
+            Pose in reference to odom.
         """
         robot = self.robot
         robot_state_client = robot.ensure_client(RobotStateClient.default_service_name)
 
-        hand_ewrt_rframe = geometry_pb2.Vec3(x=x, y=y, z=z)
-        rframe_Q_hand = geometry_pb2.Quaternion(w=qw, x=qx, y=qy, z=qz)
-        rframe_T_hand = geometry_pb2.SE3Pose(position=hand_ewrt_rframe, rotation=rframe_Q_hand)
+        point_ewrt_rframe = geometry_pb2.Vec3(x=x, y=y, z=z)
+        rframe_Q_point = geometry_pb2.Quaternion(w=qw, x=qx, y=qy, z=qz)
+        rframe_T_point = geometry_pb2.SE3Pose(position=point_ewrt_rframe, rotation=rframe_Q_point)
 
         if tf is None:
             robot_state = robot_state_client.get_robot_state()
             tf = robot_state.kinematic_state.transforms_snapshot
 
         odom_T_rframe = get_a_tform_b(tf, ODOM_FRAME_NAME, rframe)
-        odom_T_hand = odom_T_rframe * math_helpers.SE3Pose.from_obj(rframe_T_hand)
+        odom_T_point = odom_T_rframe * math_helpers.SE3Pose.from_obj(rframe_T_point)
 
-        self.poses_in_odom[name] = odom_T_hand
+        self.poses_in_odom[name] = odom_T_point
+        return odom_T_point
 
 
     def detect(self, image: np.ndarray, net: cv2.dnn.Net) -> np.ndarray:
