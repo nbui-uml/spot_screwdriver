@@ -45,11 +45,11 @@ class ArmClient:
         self.robot = robot
 
         self.joint_states = {
-            "front": (0.0,-0.328,1.611,0.0,1.7,0.0),
-            "frontright": (0.448,-0.328,1.611,-0.15,1.7,0.0),
-            "frontleft": (-0.448,-0.328,1.611,0.15,1.7,0.0),
-            "frontright_view": (0.448,-0.25,1.75,-0.15,1.7,0.0), #try different el1 values
-            "frontleft_view": (-0.448,-0.25,1.75,0.15,1.7,0.0),
+            "front": (0.0,-0.25,1.65,0.0,1.8,0.0),
+            "frontright": (0.45,-0.3,1.6,-0.15,1.7,0.0),
+            "frontleft": (-0.45,-0.3,1.6,0.15,1.7,0.0),
+            "frontright_view": (0.45,-0.25,1.8,-0.15,1.7,0.0), #try different el1 values
+            "frontleft_view": (-0.45,-0.25,1.8,0.15,1.7,0.0),
             "ready": (0.0, -1.57, 1.57, 0.0, 0.0, 0.0)
         }
 
@@ -316,6 +316,9 @@ def main(argv):
 
             input("Press any key to continue...")
 
+            sh0,sh1,el0,el1,wr0,wr1 = arm_client.joint_states["front"]
+            arm_client.joint_move(sh0,sh1,el0,el1,wr0,wr1)
+
             screwdriver_calibration(robot, robot_state_client, arm_client, screwdriver_orientation_client, "frontleft")
             arm_client.carry_position()
             screwdriver_calibration(robot, robot_state_client, arm_client, screwdriver_orientation_client, "frontright")
@@ -336,6 +339,7 @@ def main(argv):
     except Exception as exc:  # pylint: disable=broad-except
         logger = bosdyn.client.util.get_logger()
         logger.exception("Threw an exception")
+        logger.info(exc)
         return False
 
 

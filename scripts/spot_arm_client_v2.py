@@ -150,20 +150,23 @@ class ArmClient:
             robot_state = robot_state_client.get_robot_state()
             tf = robot_state.kinematic_state.transforms_snapshot
 
-        body_T_rframe = get_a_tform_b(tf, BODY_FRAME_NAME, rframe)
-        
-        body_T_hand = body_T_rframe * math_helpers.SE3Pose.from_obj(rframe_T_hand)
+        try:
+            body_T_rframe = get_a_tform_b(tf, BODY_FRAME_NAME, rframe)
+            
+            body_T_hand = body_T_rframe * math_helpers.SE3Pose.from_obj(rframe_T_hand)
 
-        arm_command = RobotCommandBuilder.arm_pose_command(
-            body_T_hand.x, body_T_hand.y, body_T_hand.z,
-            body_T_hand.rot.w, body_T_hand.rot.x, body_T_hand.rot.y, body_T_hand.rot.z, BODY_FRAME_NAME
-        )
+            arm_command = RobotCommandBuilder.arm_pose_command(
+                body_T_hand.x, body_T_hand.y, body_T_hand.z,
+                body_T_hand.rot.w, body_T_hand.rot.x, body_T_hand.rot.y, body_T_hand.rot.z, BODY_FRAME_NAME
+            )
 
-        cmd_id = command_client.robot_command(arm_command)
-        robot.logger.info("Moving arm...")
+            cmd_id = command_client.robot_command(arm_command)
+            robot.logger.info("Moving arm...")
 
-        block_until_arm_arrives(command_client, cmd_id, 10)
-        robot.logger.info("Finished moving.")
+            block_until_arm_arrives(command_client, cmd_id, 10)
+            robot.logger.info("Finished moving.")
+        except Exception as e:
+            robot.logger.exception(e)
 
 
     def stow_arm(self) -> None:
@@ -317,12 +320,11 @@ def main(argv):
             image_client = robot.ensure_client(ImageClient.default_service_name)
             image_responses = image_client.get_image([build_image_request("frontleft_fisheye_image", image_quality)])
             image = image_responses[0]
-            position = geometry_pb2.Vec3(x=0.25, y=0.0, z=0.0)
-            q = bosdyn.geometry.EulerZXY(3.14, 0, 0).to_quaternion()
+            position = geometry_pb2.Vec3(x=0.0, y=0.0, z=0.3)
+            #z axis is forward for camera. maybe align gripper axis with camera axis?
+            q = bosdyn.geometry.EulerZXY(0, 0, 0).to_quaternion()
             cam_T_position = geometry_pb2.SE3Pose(position=position, rotation=q)
-            arm_command = RobotCommandBuilder.arm_pose_command(x=0.2, y=0.0, z=0.0, qw=q.w, qx=q.x, qy=q.y, qz=q.z, frame_name=image.shot.frame_name_image_sensor)
-            cmd_id = command_client.robot_command(arm_command)
-            block_until_arm_arrives(command_client, cmd_id, 10)
+            arm_client.arm_move(position.x, position.y, position.z, q.w, q.x, q.y, q.z, image.shot.frame_name_image_sensor, image.shot.transforms_snapshot)
 
             angle = screwdriver_orientation_client.get_orientation_from_camera()
             print(f"Angle: {angle}")
@@ -331,10 +333,10 @@ def main(argv):
                 d = input("Enter distance to move or 'q' to quit: ").lower()
                 if d == 'q':
                     break
-                position.x += float(d)
-                arm_command = RobotCommandBuilder.arm_pose_command(x=0.2, y=0.0, z=0.0, qw=q.w, qx=q.x, qy=q.y, qz=q.z, frame_name=image.shot.frame_name_image_sensor)
-                cmd_id = command_client.robot_command(arm_command)
-                block_until_arm_arrives(command_client, cmd_id, 10)
+                position.z += float(d)
+                image_responses = image_client.get_image([build_image_request("frontleft_fisheye_image", image_quality)])
+                image = image_responses[0]
+                arm_client.arm_move(position.x, position.y, position.z, q.w, q.x, q.y, q.z, image.shot.frame_name_image_sensor, image.shot.transforms_snapshot)
                 angle = screwdriver_orientation_client.get_orientation_from_camera()
                 print(f"Angle: {angle}")
 
@@ -354,6 +356,7 @@ def main(argv):
     except Exception as exc:  # pylint: disable=broad-except
         logger = bosdyn.client.util.get_logger()
         logger.exception("Threw an exception")
+        logger.info(exc)
         return False
 
 
