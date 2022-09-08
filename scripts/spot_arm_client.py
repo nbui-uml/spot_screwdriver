@@ -48,8 +48,8 @@ class ArmClient:
             "front": (0.0,-0.25,1.65,0.0,1.8,0.0),
             "frontright": (0.45,-0.3,1.6,-0.15,1.7,0.0),
             "frontleft": (-0.45,-0.3,1.6,0.15,1.7,0.0),
-            "frontright_view": (0.45,-0.25,1.8,-0.15,1.7,0.0), #try different el1 values
-            "frontleft_view": (-0.45,-0.25,1.8,0.15,1.7,0.0),
+            "frontright_view": (0.45,-0.25,1.8,-0.2,1.7,0.0), #try different el1 values
+            "frontleft_view": (-0.45,-0.25,1.8,0.2,1.7,0.0),
             "ready": (0.0, -1.57, 1.57, 0.0, 0.0, 0.0)
         }
 
@@ -239,13 +239,13 @@ def screwdriver_calibration(robot, robot_state_client, arm_client, screwdriver_o
         if direction == 'q':
             break
         elif direction == 'a':
-            el1 += 0.05
+            el1 += 0.02
         elif direction == 'd':
-            el1 += -0.05
+            el1 += -0.02
         elif direction == 'w':
-            wr0 += 0.05
+            wr0 += 0.02
         elif direction == 's':
-            wr0 += -0.05
+            wr0 += -0.02
         #need to add another degree of freedom
         arm_client.joint_move(sh0,sh1,el0,el1,wr0,wr1)
         angle = screwdriver_orientation_client.get_orientation_from_camera(f"{view_name}_fisheye_image")
