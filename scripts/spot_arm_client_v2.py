@@ -322,7 +322,7 @@ def main(argv):
             image = image_responses[0]
             position = geometry_pb2.Vec3(x=0.0, y=0.0, z=0.3)
             #z axis is forward for camera. maybe align gripper axis with camera axis?
-            q = bosdyn.geometry.EulerZXY(0, 0, 0).to_quaternion()
+            q = bosdyn.geometry.EulerZXY(0, 0, 3.14).to_quaternion()
             cam_T_position = geometry_pb2.SE3Pose(position=position, rotation=q)
             arm_client.arm_move(position.x, position.y, position.z, q.w, q.x, q.y, q.z, image.shot.frame_name_image_sensor, image.shot.transforms_snapshot)
 
